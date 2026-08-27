@@ -42,14 +42,16 @@ function clampScrollFactor(value) {
   return Math.round(v * 10) / 10
 }
 
-// Friendly label for the current scroll speed.
+// Label for the current scroll speed. Rendered live beside the number while
+// the slider is dragged, so unlike the hero phrases these are keyed to the
+// value rather than rotated on a timer. Thresholds span the clamp range.
 function scrollSpeedLabel(factor) {
-  if (factor <= 0.2) return "Very slow"
-  if (factor <= 0.4) return "Slow"
-  if (factor <= 0.6) return "Medium"
-  if (factor <= 1.0) return "Fast"
-  if (factor <= 1.5) return "Very fast"
-  return "Fastest"
+  if (factor <= 0.2) return "Glacial"
+  if (factor <= 0.4) return "Decaf"
+  if (factor <= 0.6) return "Cruising"
+  if (factor <= 1.0) return "Caffeinated"
+  if (factor <= 1.5) return "Overclocked"
+  return "Ludicrous"
 }
 
 if (typeof module !== "undefined") {

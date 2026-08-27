@@ -9,7 +9,7 @@ common Hyprland touchpad settings behind a single click.
 ## Features
 
 - **Enable / disable** the touchpad
-- **Scroll speed** slider (0.1–2.0) with friendly labels, adjustable by scroll wheel or drag
+- **Scroll speed** slider (0.1–2.0) with named tiers, adjustable by scroll wheel or drag
 - **Natural scrolling** toggle
 - **Tap to click** toggle
 - **Disable while typing** toggle
@@ -32,6 +32,20 @@ than hard-cut. Which set rotates depends on the pad:
 
 Edit `enabledPhrases` / `disabledPhrases` near the top of `Panel.qml` to make
 them your own.
+
+The scroll speed slider is labeled the same way in spirit, but keyed to the
+value rather than a timer -- it updates live as you drag, alongside the number:
+
+| Factor | Label |
+| --- | --- |
+| 0.1 – 0.2 | Glacial |
+| 0.3 – 0.4 | Decaf |
+| 0.5 – 0.6 | Cruising |
+| 0.7 – 1.0 | Caffeinated |
+| 1.1 – 1.5 | Overclocked |
+| 1.6 – 2.0 | Ludicrous |
+
+Omarchy's default is `0.4`. Change the tiers in `scrollSpeedLabel()` in `Model.js`.
 
 ## Settings persistence
 
