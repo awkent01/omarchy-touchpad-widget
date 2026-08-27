@@ -67,6 +67,23 @@ outside strings are interpolated.
 
 Edit the widget, not that file; it is regenerated on every change.
 
+## Enabling is not symmetric with disabling
+
+Disabling is immediate: `hl.device({ enabled = false })` detaches the device
+right away. Enabling is not -- setting `enabled = true` updates the config
+value but does not re-attach a device the compositor has already detached, so
+the pad stays dead until the next config reload.
+
+So the enable path chains a reload, ordered *after*
+`omarchy-toggle-input-device` clears its `touchpad-disabled-name` marker.
+Reloading first would just let `disabled-input-device.lua` read the marker
+back and re-disable the device.
+
+This also means the marker file is not a trustworthy source of truth for the
+UI: `omarchy-toggle-input-device on` removes it *before* it applies anything,
+so a failed enable leaves the marker gone and the pad dead. The panel re-reads
+real state shortly after any toggle rather than trusting its optimistic flip.
+
 ## Install
 
 ```bash

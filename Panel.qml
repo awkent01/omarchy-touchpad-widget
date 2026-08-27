@@ -115,11 +115,27 @@ Panel {
   }
 
   // ---- Actions ----
+  // Disabling is immediate -- Hyprland detaches the device the moment
+  // hl.device({ enabled = false }) lands. Enabling is NOT symmetric: setting
+  // enabled = true updates the config value but does not re-attach a device
+  // that is already detached, so the pad stays dead until the next config
+  // reload. Chain the reload onto the enable in one shell so it is ordered
+  // after omarchy-toggle-input-device has cleared the disabled-name marker;
+  // reloading first would just let disabled-input-device.lua re-disable it.
   function toggleTouchpad() {
     if (!deviceName) return
     var next = !touchpadEnabled
     touchpadEnabled = next
-    Quickshell.execDetached(["omarchy-toggle-input-device", "touchpad", next ? "on" : "off"])
+    if (next) {
+      Quickshell.execDetached(["bash", "-c",
+        "omarchy-toggle-input-device touchpad on && hyprctl reload >/dev/null"])
+    } else {
+      Quickshell.execDetached(["omarchy-toggle-input-device", "touchpad", "off"])
+    }
+    // The optimistic flip above is a guess until the marker file and the
+    // compositor agree. Re-read shortly after so a failed enable corrects
+    // itself rather than leaving the panel claiming ENABLED over a dead pad.
+    enableSettle.restart()
   }
 
   function toggleNaturalScroll() {
@@ -278,6 +294,15 @@ Panel {
       heroStatus.opacity = 1.0
       root.phraseIndex = 0
     }
+  }
+
+  // Give omarchy-toggle-input-device and the reload time to land, then
+  // reconcile the panel against real state.
+  Timer {
+    id: enableSettle
+    interval: 600
+    repeat: false
+    onTriggered: root.refresh()
   }
 
   Timer {
