@@ -89,6 +89,37 @@ Then add the widget to your bar from Omarchy's bar settings and reload the shell
 - Omarchy with the Quickshell bar
 - Hyprland (`hyprctl` on `PATH`)
 
+## Development
+
+Saving a file under `~/.config/omarchy/plugins/` hot-reloads the plugin, and
+the journal will say so:
+
+```bash
+journalctl --user -f | grep touchpad   # "Local plugin changed, reloading: ..."
+```
+
+That log line means the *file* was picked up -- it does not mean the running
+widget was rebuilt. Edits to bindings and values apply live, but structural
+changes (adding root properties, new `id`s, new Timer/Animation elements) leave
+the already-instantiated widget on the old component. The panel keeps rendering
+the old text with no QML error to warn you. When that happens:
+
+```bash
+omarchy restart shell
+```
+
+Note that `omarchy-shell shell rescanPlugins` tears the plugin down and rebuilds
+it, so an IPC call fired immediately after returns `Target not found` until it
+re-registers. Retry a moment later.
+
+Useful checks:
+
+```bash
+omarchy-shell awkent01.touchpad open      # open the panel without clicking
+hyprctl layers | grep keyboard-panel      # confirm the panel surface exists
+grim -o eDP-1 /tmp/panel.png              # look at what actually rendered
+```
+
 ## License
 
 MIT
