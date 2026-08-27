@@ -16,6 +16,22 @@ common Hyprland touchpad settings behind a single click.
 - **Clickfinger behavior** toggle
 - Full keyboard cursor navigation across every control
 - IPC handlers (`open` / `close` / `toggle` / `show` / `hide`) for keybinds
+- Rotating hero status phrases, in the style of the built-in panels
+
+## Status phrases
+
+Like Omarchy's built-in network, bluetooth, and power panels, the hero status
+line cycles a phrase every 2.8s while the panel is open, cross-faded rather
+than hard-cut. Which set rotates depends on the pad:
+
+| State | Phrases |
+| --- | --- |
+| Enabled | Tracking fingers, Counting taps, Reading swipes, Sensing capacitance, Herding pixels, Chasing gestures, Smoothing jitter, Polling deltas, Feeling around |
+| Disabled | Keyboardpunk, Palms rejected, Homerow purist, Hjkl forever, Sensor napping, Ignoring thumbs, Refusing swipes, Gone tactile |
+| No device | `NO DEVICE` (static) |
+
+Edit `enabledPhrases` / `disabledPhrases` near the top of `Panel.qml` to make
+them your own.
 
 ## Settings persistence
 

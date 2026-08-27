@@ -42,9 +42,43 @@ Panel {
     return touchpadEnabled ? "󰟸" : "󰤳"
   }
 
+  // Agent-flavored phrases for the hero status line, rotated on a timer so the
+  // panel feels alive -- the same trick the built-in network, bluetooth, and
+  // power panels use. Two sets, picked by whether the pad is listening or not.
+  readonly property var enabledPhrases: [
+    "Tracking fingers",
+    "Counting taps",
+    "Reading swipes",
+    "Sensing capacitance",
+    "Herding pixels",
+    "Chasing gestures",
+    "Smoothing jitter",
+    "Polling deltas",
+    "Feeling around"
+  ]
+  readonly property var disabledPhrases: [
+    "Keyboardpunk",
+    "Palms rejected",
+    "Homerow purist",
+    "Hjkl forever",
+    "Sensor napping",
+    "Ignoring thumbs",
+    "Refusing swipes",
+    "Gone tactile"
+  ]
+  property int phraseIndex: 0
+
+  // Whichever list is "active" given the current touchpad state. Empty when
+  // there is no device, which is what parks the rotation on a static label.
+  readonly property var activePhrases: {
+    if (!deviceName) return []
+    return touchpadEnabled ? enabledPhrases : disabledPhrases
+  }
+  readonly property bool rotatingPhrases: activePhrases.length > 0
+
   readonly property string heroStatusText: {
-    if (!deviceName) return "NO DEVICE"
-    return touchpadEnabled ? "ENABLED" : "DISABLED"
+    if (!deviceName) return "No device"
+    return activePhrases[phraseIndex % activePhrases.length]
   }
 
   readonly property color hoverFill: bar
@@ -203,6 +237,49 @@ Panel {
     onTriggered: root.refresh()
   }
 
+  // Rotate the hero phrase while the panel is open and a device is present.
+  // The swap is wrapped in a fade so the changeover reads as one motion
+  // rather than a hard cut.
+  Timer {
+    id: phraseTimer
+    interval: 2800
+    running: root.opened && root.rotatingPhrases
+    repeat: true
+    triggeredOnStart: false
+    onTriggered: phraseSwap.restart()
+  }
+
+  SequentialAnimation {
+    id: phraseSwap
+    PropertyAnimation {
+      target: heroStatus; property: "opacity"
+      to: 0.0; duration: 180; easing.type: Easing.OutQuad
+    }
+    ScriptAction {
+      script: {
+        var n = root.activePhrases.length
+        if (n > 0) root.phraseIndex = (root.phraseIndex + 1) % n
+      }
+    }
+    PropertyAnimation {
+      target: heroStatus; property: "opacity"
+      to: 1.0; duration: 260; easing.type: Easing.InQuad
+    }
+  }
+
+  // Toggling the pad swaps phrase sets, so restart the cycle from the top --
+  // otherwise index 4 of "enabled" carries over as index 4 of "disabled" and
+  // the label looks like it skipped. Leaving a rotating state entirely (device
+  // unplugged) halts a mid-flight fade so "NO DEVICE" is never stuck dimmed.
+  Connections {
+    target: root
+    function onActivePhrasesChanged() {
+      phraseSwap.stop()
+      heroStatus.opacity = 1.0
+      root.phraseIndex = 0
+    }
+  }
+
   Timer {
     id: scrollDebounce
     interval: 200
@@ -339,7 +416,8 @@ Panel {
             }
 
             Text {
-              text: root.heroStatusText
+              id: heroStatus
+              text: root.heroStatusText.toUpperCase()
               color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
