@@ -1,0 +1,51 @@
+#!/bin/bash
+# Apply and persist the touchpad's per-device pointer sensitivity.
+#
+# Usage: touchpad-sensitivity <-1.0..1.0>
+#
+# Hyprland has no input:touchpad:sensitivity -- only the global
+# input:sensitivity, which would drag the trackpoint and any USB mouse along
+# with it. So this targets the touchpad device by name.
+#
+# Device names come from USB descriptors. They are never interpolated into a
+# shell word, and they reach `hyprctl eval` only after being escaped for a Lua
+# string literal, so a hostile name cannot close the quote and inject code.
+# Omarchy's own omarchy-toggle-input-device does the same dance for the same
+# reason; a past migration exists precisely because an earlier version didn't.
+
+set -euo pipefail
+
+STATE_DIR="$HOME/.local/state/omarchy/toggles/hypr"
+
+sens="${1:-}"
+
+# Reject anything that is not a plain decimal in range. This is the only value
+# interpolated into the Lua, so it has to be airtight.
+if [[ ! $sens =~ ^-?(0(\.[0-9])?|1(\.0)?)$ ]]; then
+  echo "sensitivity must be a decimal in [-1.0, 1.0], got: ${sens@Q}" >&2
+  exit 1
+fi
+
+device="$(omarchy-hw-touchpad)"
+
+if [[ -z $device ]]; then
+  echo "No touchpad device found" >&2
+  exit 1
+fi
+
+if [[ $device == *[[:cntrl:]]* ]]; then
+  echo "Invalid touchpad device name" >&2
+  exit 1
+fi
+
+# Escape for a Lua double-quoted string: backslashes first, then quotes.
+quoted=${device//\\/\\\\}
+quoted=${quoted//\"/\\\"}
+
+hyprctl eval "hl.device({ name = \"$quoted\", sensitivity = $sens })" >/dev/null
+
+# Persist as data, never as generated code. touchpad-settings.lua reads these
+# back on every config reload.
+mkdir -p "$STATE_DIR"
+printf '%s\n' "$device" >"$STATE_DIR/touchpad-sensitivity-name"
+printf '%s\n' "$sens" >"$STATE_DIR/touchpad-sensitivity-value"

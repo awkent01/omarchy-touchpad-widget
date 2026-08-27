@@ -20,6 +20,12 @@ Panel {
   property bool disableWhileTyping: true
   property bool clickfingerBehavior: true
   property real scrollFactor: 0.4
+  // Hyprland sensitivity is [-1.0, 1.0] with 0.0 as libinput's unaccelerated
+  // baseline. There is no input:touchpad:sensitivity -- only the global
+  // input:sensitivity, which would drag the trackpoint and any USB mouse along
+  // with it -- so this is applied per-device to the touchpad alone.
+  property real pointerSpeed: 0.0
+  property real pendingPointerSpeed: 0.0
 
   // Pending scroll factor while dragging the slider.
   property real pendingScrollFactor: 0.4
@@ -35,7 +41,7 @@ Panel {
   property int selectedIndex: 0
   property bool cursorActive: false
 
-  readonly property var allSections: ["header", "scroll", "natural", "tap", "typing", "clickfinger"]
+  readonly property var allSections: ["header", "scroll", "pointer", "natural", "tap", "typing", "clickfinger"]
 
   readonly property string icon: {
     if (!deviceName) return ""
@@ -76,9 +82,14 @@ Panel {
   }
   readonly property bool rotatingPhrases: activePhrases.length > 0
 
+  // Guard on the list itself rather than on deviceName. Bindings settle in
+  // arbitrary order, so there is a tick where deviceName is already set but
+  // activePhrases has not re-evaluated yet -- phraseIndex % 0 is NaN there,
+  // and the lookup returns undefined, which QML refuses to assign to a string.
   readonly property string heroStatusText: {
-    if (!deviceName) return "No device"
-    return activePhrases[phraseIndex % activePhrases.length]
+    var list = activePhrases
+    if (!list || list.length === 0) return "No device"
+    return String(list[phraseIndex % list.length] || "No device")
   }
 
   readonly property color hoverFill: bar
@@ -103,6 +114,8 @@ Panel {
   function moveCursorH(delta) {
     if (focusSection === "scroll") {
       adjustScrollFactor(delta > 0 ? 0.1 : -0.1)
+    } else if (focusSection === "pointer") {
+      adjustPointerSpeed(delta > 0 ? 0.1 : -0.1)
     }
   }
 
@@ -189,6 +202,26 @@ Panel {
       + "    },\n"
       + "  },\n"
       + "})\n"
+      // Device names are read back as data at reload time, never written into
+      // this file as code. Same rule default/hypr/disabled-input-device.lua
+      // follows for the disabled-name marker.
+      + "\n"
+      + "-- Re-apply the per-device pointer sensitivity. Both values are read as\n"
+      + "-- data; nothing below is generated from a device name.\n"
+      + "local paths = require(\"default.hypr.paths\")\n"
+      + "local dir = paths.state_home .. \"/omarchy/toggles/hypr\"\n"
+      + "local function read_line(path)\n"
+      + "  local f = io.open(path, \"r\")\n"
+      + "  if not f then return nil end\n"
+      + "  local line = f:read(\"*l\")\n"
+      + "  f:close()\n"
+      + "  return line\n"
+      + "end\n"
+      + "local sens_name = read_line(dir .. \"/touchpad-sensitivity-name\")\n"
+      + "local sens_value = tonumber(read_line(dir .. \"/touchpad-sensitivity-value\"))\n"
+      + "if sens_name and sens_name ~= \"\" and sens_value then\n"
+      + "  hl.device({ name = sens_name, sensitivity = sens_value })\n"
+      + "end\n"
 
     // Only booleans and a clamped number reach the file -- no device names or
     // other outside strings are ever interpolated into generated Lua.
@@ -213,6 +246,36 @@ Panel {
 
   function commitScrollFactor() {
     setHyprOption("scroll_factor", pendingScrollFactor)
+  }
+
+  function adjustPointerSpeed(delta) {
+    var next = Model.clampSensitivity(pointerSpeed + delta)
+    pointerSpeed = next
+    pendingPointerSpeed = next
+    pointerDebounce.restart()
+  }
+
+  function setPointerSpeed(value) {
+    var clamped = Model.clampSensitivity(value)
+    pointerSpeed = clamped
+    pendingPointerSpeed = clamped
+    pointerDebounce.restart()
+  }
+
+  // Applied per-device rather than through input:sensitivity so the trackpoint
+  // and any plugged-in mouse keep their own speed. The device name lookup,
+  // validation, escaping, and persistence all live in the touchpad-sensitivity
+  // script beside this file -- keeping that logic out of a QML string literal
+  // is what makes the Lua escaping reviewable and testable.
+  readonly property string sensitivityScript:
+    String(Qt.resolvedUrl("touchpad-sensitivity")).replace(/^file:\/\//, "")
+
+  function commitPointerSpeed() {
+    if (!deviceName) return
+    var v = Model.clampSensitivity(pendingPointerSpeed)
+    pointerSpeed = v
+    Quickshell.execDetached([sensitivityScript, v.toFixed(1)])
+    persistSettings()
   }
 
   function refresh() {
@@ -312,6 +375,13 @@ Panel {
     onTriggered: root.commitScrollFactor()
   }
 
+  Timer {
+    id: pointerDebounce
+    interval: 200
+    repeat: false
+    onTriggered: root.commitPointerSpeed()
+  }
+
   // ---- State process: reads all touchpad options in one shot ----
   Process {
     id: stateProc
@@ -322,13 +392,17 @@ Panel {
       "hyprctl getoption 'input:touchpad:tap-to-click' -j 2>/dev/null; echo '---SPLIT---'; " +
       "hyprctl getoption input:touchpad:disable_while_typing -j 2>/dev/null; echo '---SPLIT---'; " +
       "hyprctl getoption input:touchpad:clickfinger_behavior -j 2>/dev/null; echo '---SPLIT---'; " +
-      "test -f \"$HOME/.local/state/omarchy/toggles/hypr/touchpad-disabled-name\" && echo disabled || echo enabled"
+      "test -f \"$HOME/.local/state/omarchy/toggles/hypr/touchpad-disabled-name\" && echo disabled || echo enabled; " +
+      "echo '---SPLIT---'; " +
+      // Device options cannot be read back through hyprctl getoption, so the
+      // value we last wrote is the only source of truth for the slider.
+      "cat \"$HOME/.local/state/omarchy/toggles/hypr/touchpad-sensitivity-value\" 2>/dev/null"
     ]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         var parts = String(text || "").split("---SPLIT---")
-        if (parts.length < 7) return
+        if (parts.length < 8) return
 
         root.deviceName = Model.parseTouchpadDevice(parts[0])
         root.naturalScroll = Model.parseBool(parts[1])
@@ -338,6 +412,12 @@ Panel {
         root.disableWhileTyping = Model.parseBool(parts[4])
         root.clickfingerBehavior = Model.parseBool(parts[5])
         root.touchpadEnabled = String(parts[6] || "").trim() !== "disabled"
+
+        // null means "never set" -- fall back to Hyprland's 0.0 baseline
+        // rather than letting an unreadable file read as a real value.
+        var sens = Model.parseSensitivityFile(parts[7])
+        root.pointerSpeed = sens === null ? 0.0 : sens
+        root.pendingPointerSpeed = root.pointerSpeed
       }
     }
   }
@@ -596,6 +676,153 @@ Panel {
                 onContainsMouseChanged: if (containsMouse) {
                   root.cursorActive = true
                   root.focusSection = "scroll"
+                }
+              }
+            }
+          }
+        }
+
+        PanelSeparator {
+          foreground: root.bar.foreground
+        }
+
+        // ========== Pointer speed slider ==========
+        // Range is Hyprland's [-1.0, 1.0], centered on 0.0 rather than running
+        // low-to-high like the scroll slider above it.
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+          opacity: root.touchpadEnabled ? 1.0 : 0.4
+
+          Item {
+            width: parent.width
+            implicitHeight: pointerLabel.implicitHeight
+
+            Text {
+              id: pointerLabel
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Pointer Speed"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Text {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: {
+                var v = pointerSlider.dragging ? pointerSlider.liveValue : root.pointerSpeed
+                return Model.pointerSpeedLabel(v) + "  " + v.toFixed(1)
+              }
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(pMinusBtn.implicitHeight, pointerRow.implicitHeight, pPlusBtn.implicitHeight)
+
+            CursorSurface {
+              id: pMinusSurface
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(32)
+              height: Style.space(32)
+              hasCursor: false
+              foreground: root.bar.foreground
+              fill: root.hoverFill
+
+              Text {
+                id: pMinusBtn
+                anchors.centerIn: parent
+                text: "−"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.heading
+                opacity: root.pointerSpeed <= -1.0 ? 0.3 : 1.0
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.adjustPointerSpeed(-0.1)
+                onContainsMouseChanged: if (containsMouse) {
+                  root.cursorActive = true
+                  root.focusSection = "pointer"
+                }
+              }
+            }
+
+            CursorSurface {
+              id: pointerRow
+              anchors.left: pMinusSurface.right
+              anchors.right: pPlusSurface.left
+              anchors.leftMargin: Style.space(4)
+              anchors.rightMargin: Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              height: pointerSlider.implicitHeight + Style.spacing.controlGap
+              hasCursor: root.cursorActive && root.focusSection === "pointer"
+              foreground: root.bar.foreground
+              outline: true
+
+              PanelSlider {
+                id: pointerSlider
+                bar: root.bar
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(6)
+                minimum: -1.0
+                maximum: 1.0
+                step: 0.1
+                value: root.pointerSpeed
+                onMoved: function(v) { root.setPointerSpeed(v) }
+                onReleased: function(v) {
+                  pointerDebounce.stop()
+                  root.setPointerSpeed(v)
+                  root.commitPointerSpeed()
+                }
+              }
+
+              HoverHandler {
+                onHoveredChanged: if (hovered) {
+                  root.cursorActive = true
+                  root.focusSection = "pointer"
+                }
+              }
+            }
+
+            CursorSurface {
+              id: pPlusSurface
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(32)
+              height: Style.space(32)
+              hasCursor: false
+              foreground: root.bar.foreground
+              fill: root.hoverFill
+
+              Text {
+                id: pPlusBtn
+                anchors.centerIn: parent
+                text: "+"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.heading
+                opacity: root.pointerSpeed >= 1.0 ? 0.3 : 1.0
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.adjustPointerSpeed(0.1)
+                onContainsMouseChanged: if (containsMouse) {
+                  root.cursorActive = true
+                  root.focusSection = "pointer"
                 }
               }
             }

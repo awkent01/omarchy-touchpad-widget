@@ -54,12 +54,49 @@ function scrollSpeedLabel(factor) {
   return "Ludicrous"
 }
 
+// Clamp pointer sensitivity to Hyprland's [-1.0, 1.0] and round to 1 decimal.
+// 0.0 is libinput's unaccelerated baseline, not a midpoint of "off" and "on".
+function clampSensitivity(value) {
+  var v = Number(value)
+  if (!isFinite(v)) v = 0
+  if (v < -1.0) v = -1.0
+  if (v > 1.0) v = 1.0
+  return Math.round(v * 10) / 10
+}
+
+// Label for pointer sensitivity. Centered on 0.0 = system default, so the
+// scale reads outward in both directions rather than slow-to-fast.
+function pointerSpeedLabel(sensitivity) {
+  var v = clampSensitivity(sensitivity)
+  if (v <= -0.7) return "Sedated"
+  if (v <= -0.3) return "Unhurried"
+  if (v < 0) return "Relaxed"
+  if (v === 0) return "Stock"
+  if (v < 0.4) return "Perky"
+  if (v < 0.7) return "Twitchy"
+  return "Caffeinated"
+}
+
+// Parse a single-line data file holding a sensitivity value. Returns null when
+// the file is absent or unparseable so callers can fall back to the default
+// rather than silently treating a missing value as 0.0.
+function parseSensitivityFile(text) {
+  var raw = String(text || "").trim()
+  if (raw === "") return null
+  var v = Number(raw)
+  if (!isFinite(v)) return null
+  return clampSensitivity(v)
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     parseBool: parseBool,
     parseFloat: parseFloat,
     parseTouchpadDevice: parseTouchpadDevice,
     clampScrollFactor: clampScrollFactor,
+    clampSensitivity: clampSensitivity,
+    pointerSpeedLabel: pointerSpeedLabel,
+    parseSensitivityFile: parseSensitivityFile,
     scrollSpeedLabel: scrollSpeedLabel
   }
 }

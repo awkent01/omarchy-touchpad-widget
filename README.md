@@ -10,6 +10,7 @@ common Hyprland touchpad settings behind a single click.
 
 - **Enable / disable** the touchpad
 - **Scroll speed** slider (0.1–2.0) with named tiers, adjustable by scroll wheel or drag
+- **Pointer speed** slider (−1.0–+1.0), scoped to the touchpad alone
 - **Natural scrolling** toggle
 - **Tap to click** toggle
 - **Disable while typing** toggle
@@ -67,6 +68,35 @@ outside strings are interpolated.
 
 Edit the widget, not that file; it is regenerated on every change.
 
+## Pointer speed is per-device on purpose
+
+Hyprland has no `input:touchpad:sensitivity`. The only global knob is
+`input:sensitivity`, which would drag the trackpoint and any plugged-in mouse
+along with the touchpad -- wrong for a widget named Touchpad. So sensitivity is
+applied to the touchpad device by name:
+
+```lua
+hl.device({ name = "<touchpad>", sensitivity = 0.4 })
+```
+
+Two consequences:
+
+- **It cannot be read back.** `hyprctl getoption device:<name>:sensitivity`
+  answers `no such option`, and `hyprctl devices` reports only `defaultSpeed`.
+  The value last written to
+  `~/.local/state/omarchy/toggles/hypr/touchpad-sensitivity-value` is the only
+  source of truth the slider has.
+- **The device name is data, never code.** Names come from USB descriptors.
+  They are written to a sibling `-name` file and read back by the generated
+  Lua at reload time; nothing interpolates a name into generated Lua or into a
+  QML string. The escaping and validation for the one `hyprctl eval` that does
+  need the name live in the `touchpad-sensitivity` script, where they can be
+  tested directly. Omarchy carries a migration (`1787618700.sh`) for exactly
+  this class of bug, so the plugin follows the same rule.
+
+`hyprctl keyword` is not an option here -- Omarchy uses the Lua config parser,
+which answers `keyword can't work with non-legacy parsers. Use eval.`
+
 ## Enabling is not symmetric with disabling
 
 Disabling is immediate: `hl.device({ enabled = false })` detaches the device
@@ -100,6 +130,7 @@ Then add the widget to your bar from Omarchy's bar settings and reload the shell
 | `manifest.json` | Plugin manifest (schema v1, `bar-widget` kind) |
 | `Panel.qml` | The widget UI, state polling, IPC, and persistence |
 | `Model.js` | Pure helpers: `hyprctl` JSON parsing, clamping, speed labels |
+| `touchpad-sensitivity` | Applies + persists per-device pointer sensitivity |
 
 ## Requirements
 
