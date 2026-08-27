@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "awkent01.touchpad",
+  "name": "Touchpad",
+  "version": "1.0.0",
+  "author": "awkent01",
+  "description": "Touchpad controls: toggle, scroll speed, natural scrolling, tap-to-click",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Touchpad",
+    "description": "Touchpad controls: toggle, scroll speed, natural scrolling, tap-to-click",
+    "category": "Input",
+    "allowMultiple": false
+  }
+}
