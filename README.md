@@ -6,6 +6,16 @@ common Hyprland touchpad settings behind a single click.
 ![kind: bar-widget](https://img.shields.io/badge/kind-bar--widget-blue)
 ![category: Input](https://img.shields.io/badge/category-Input-lightgrey)
 
+![The panel, enabled and disabled](docs/panel-states.png)
+
+Enabled and disabled. The hero line cycles a phrase every 2.8s; the whole panel
+takes its colors from your active Omarchy theme, so yours will not be red unless
+you are also running a red one.
+
+In the bar, between the speaker and the display widgets:
+
+![The widget in the bar](docs/bar-widget.png)
+
 ## Features
 
 - **Enable / disable** the touchpad
