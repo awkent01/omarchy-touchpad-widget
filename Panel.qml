@@ -128,13 +128,22 @@ Panel {
   }
 
   // ---- Actions ----
-  // Disabling is immediate -- Hyprland detaches the device the moment
-  // hl.device({ enabled = false }) lands. Enabling is NOT symmetric: setting
-  // enabled = true updates the config value but does not re-attach a device
-  // that is already detached, so the pad stays dead until the next config
-  // reload. Chain the reload onto the enable in one shell so it is ordered
-  // after omarchy-toggle-input-device has cleared the disabled-name marker;
-  // reloading first would just let disabled-input-device.lua re-disable it.
+  // The reload chained onto the enable is defensive, not a proven fix.
+  //
+  // We hit one failure where the pad stayed dead after toggling back on while
+  // the panel reported ENABLED, and an explicit `hyprctl reload` revived it.
+  // The obvious explanation -- that hl.device({ enabled = true }) cannot
+  // re-attach an already-detached device -- was later tested directly and is
+  // FALSE: `omarchy-toggle-touchpad off` then `on` recovers fine on its own,
+  // with or without a config reload in between. So the original trigger is
+  // still unidentified, and quite possibly was a transient unrelated to the
+  // stock tool (the shell was being restarted repeatedly at the time).
+  //
+  // The reload stays because it is cheap, idempotent, and makes the enable
+  // path robust whatever that transient was -- it also re-applies our own
+  // persisted settings. Do not read it as documentation of a Hyprland bug.
+  // It is ordered after omarchy-toggle-input-device clears the disabled-name
+  // marker; reloading first would let disabled-input-device.lua re-disable.
   function toggleTouchpad() {
     if (!deviceName) return
     var next = !touchpadEnabled

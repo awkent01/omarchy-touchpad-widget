@@ -107,22 +107,30 @@ Two consequences:
 `hyprctl keyword` is not an option here -- Omarchy uses the Lua config parser,
 which answers `keyword can't work with non-legacy parsers. Use eval.`
 
-## Enabling is not symmetric with disabling
+## Why the enable path reloads
 
-Disabling is immediate: `hl.device({ enabled = false })` detaches the device
-right away. Enabling is not -- setting `enabled = true` updates the config
-value but does not re-attach a device the compositor has already detached, so
-the pad stays dead until the next config reload.
+The enable path runs `omarchy-toggle-input-device touchpad on && hyprctl
+reload`. That reload is **defensive, not a documented fix.**
 
-So the enable path chains a reload, ordered *after*
-`omarchy-toggle-input-device` clears its `touchpad-disabled-name` marker.
-Reloading first would just let `disabled-input-device.lua` read the marker
-back and re-disable the device.
+During development the pad once stayed dead after being toggled back on, while
+the panel still reported `ENABLED`, and an explicit `hyprctl reload` revived
+it. The obvious explanation -- that `hl.device({ enabled = true })` cannot
+re-attach an already-detached device -- was tested afterwards and turned out to
+be wrong: the stock `omarchy-toggle-touchpad off` then `on` recovers on its
+own, with or without a config reload in between. The original trigger was never
+identified and may have been a transient unrelated to the stock tool.
 
-This also means the marker file is not a trustworthy source of truth for the
-UI: `omarchy-toggle-input-device on` removes it *before* it applies anything,
-so a failed enable leaves the marker gone and the pad dead. The panel re-reads
-real state shortly after any toggle rather than trusting its optimistic flip.
+The reload stays because it is cheap, idempotent, and re-applies this plugin's
+own persisted settings anyway. It is ordered *after*
+`omarchy-toggle-input-device` clears its `touchpad-disabled-name` marker --
+reloading first would let `disabled-input-device.lua` read the marker back and
+re-disable the device.
+
+Separately, and independent of all that: the marker file is not a trustworthy
+source of truth for the UI. `omarchy-toggle-input-device on` removes it
+*before* it applies anything, so any failed enable would leave the marker gone
+and the panel claiming `ENABLED`. The panel re-reads real state shortly after
+every toggle rather than trusting its optimistic flip.
 
 ## Install
 
