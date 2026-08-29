@@ -184,8 +184,22 @@ Panel {
     setHyprOption("clickfinger_behavior", next)
   }
 
+  // Every caller passes a literal option name and an already-clamped value, but
+  // this string is handed to `hyprctl eval` as Lua, so it is checked here
+  // instead of resting on a caller audit -- the guarantee should be readable in
+  // this function alone. An option name is a bare identifier; a number is
+  // rendered as a plain decimal rather than through String(), which for an
+  // unexpected magnitude could emit exponent notation.
   function setHyprOption(option, value) {
-    var luaValue = typeof value === "boolean" ? (value ? "true" : "false") : String(value)
+    if (!/^[a-z_]+$/.test(option)) return
+    var luaValue
+    if (typeof value === "boolean") {
+      luaValue = value ? "true" : "false"
+    } else {
+      var n = Number(value)
+      if (!isFinite(n)) return
+      luaValue = n.toFixed(1)
+    }
     Quickshell.execDetached(["hyprctl", "eval", "hl.config({ input = { touchpad = { " + option + " = " + luaValue + " } } })"])
     persistSettings()
   }
@@ -421,6 +435,12 @@ Panel {
       "hyprctl getoption 'input:touchpad:tap-to-click' -j 2>/dev/null; echo '---SPLIT---'; " +
       "hyprctl getoption input:touchpad:disable_while_typing -j 2>/dev/null; echo '---SPLIT---'; " +
       "hyprctl getoption input:touchpad:clickfinger_behavior -j 2>/dev/null; echo '---SPLIT---'; " +
+      // Omarchy's own marker file, tested rather than read: this yields a
+      // boolean and opens nothing, so a planted symlink or FIFO here can at
+      // worst mislabel the toggle for one refresh -- it cannot redirect a
+      // write or block this process. The file belongs to
+      // omarchy-toggle-input-device, so hardening how it is *written* belongs
+      // upstream rather than in a plugin that only reads it.
       "test -f \"$HOME/.local/state/omarchy/toggles/hypr/touchpad-disabled-name\" && echo disabled || echo enabled; " +
       "echo '---SPLIT---'; " +
       // Device options cannot be read back through hyprctl getoption, so the
