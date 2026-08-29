@@ -78,6 +78,43 @@ outside strings are interpolated.
 
 Edit the widget, not that file; it is regenerated on every change.
 
+## Writing to a predictable path safely
+
+The three files this widget persists all live at paths anyone can guess, which
+means a plain `> file` or `cat file` is not good enough: a symlink planted at
+one of those paths would redirect a write into whatever else it names, under
+your own uid, and a FIFO planted there would block the writer indefinitely --
+wedging the widget's state process, or a Hyprland config reload.
+
+So nothing reads or writes those paths directly. Every access goes through
+`touchpad-state`, which:
+
+- **Validates the directory first.** Every component from `$HOME` down to
+  `toggles/hypr` must be a real directory, owned by you, and writable by nobody
+  else. That is the structural defense: if no one else can write to the
+  directory, no one else can plant anything in it. Anything the helper has to
+  create is created `0700`; directories Omarchy already made at `0755` are
+  accepted as-is, so the helper never chmods a directory it shares with the
+  stock toggle tools. If the chain fails the check, it refuses to write at all.
+- **Reads no-follow, nonblocking, and bounded.** `dd iflag=nofollow,nonblock`
+  with a byte limit, so a symlink fails the open outright rather than being
+  read through, a FIFO cannot block, and nothing can be made to read without
+  end. Because bash cannot `fstat` the descriptor `dd` used, the file's device
+  and inode are compared before and after to confirm that the file checked is
+  the file that was read.
+- **Writes through an exclusive temporary.** Content goes to a `mktemp`
+  (`O_CREAT|O_EXCL`, mode `0600`) in the destination's own directory and is
+  then `rename(2)`d into place, so readers see the old file or the new one and
+  never a partial write. The destination is checked first and the write is
+  *refused* -- not forced -- if anything other than a plain, single-linked file
+  of yours is sitting on the path.
+
+`touchpad-settings.lua` is loaded by Hyprland's Lua config, which has no
+`lstat` and no `O_NOFOLLOW` and so cannot make those guarantees itself. The
+validated directory is what protects it; on top of that, its two reads are
+byte-bounded and the values re-validated before use, so a file that somehow did
+change still cannot stall a reload or hand `hl.device` something out of range.
+
 ## Pointer speed is per-device on purpose
 
 Hyprland has no `input:touchpad:sensitivity`. The only global knob is
@@ -169,7 +206,9 @@ hyprctl reload
 ```
 
 Those three files are the only things this plugin writes outside its own
-directory. Leave the other files in that directory alone -- `flags.lua` and
+directory, and `touchpad-state` is the only thing that writes them (see
+[Writing to a predictable path safely](#writing-to-a-predictable-path-safely)).
+Leave the other files in that directory alone -- `flags.lua` and
 `touchpad-disabled-name` belong to Omarchy itself, not to this plugin.
 
 After the reload, your touchpad returns to whatever `hypr/input.lua` specifies.
@@ -182,6 +221,7 @@ After the reload, your touchpad returns to whatever `hypr/input.lua` specifies.
 | `Panel.qml` | The widget UI, state polling, IPC, and persistence |
 | `Model.js` | Pure helpers: `hyprctl` JSON parsing, clamping, speed labels |
 | `touchpad-sensitivity` | Applies + persists per-device pointer sensitivity |
+| `touchpad-state` | The only reader and writer of the three state files below |
 
 ## Requirements
 
@@ -197,6 +237,7 @@ shells out to already ships with Omarchy or Hyprland:
 | `omarchy-hw-touchpad` | Omarchy | Resolving the touchpad's device name |
 | `omarchy-toggle-input-device` | Omarchy | Enabling / disabling the touchpad |
 | `omarchy-toggle-touchpad` | Omarchy | Stock touchpad toggle path |
+| `dd`, `stat`, `mktemp` | coreutils | No-follow bounded reads and atomic writes in `touchpad-state` |
 
 - Omarchy with the Quickshell bar
 - Hyprland (`hyprctl` on `PATH`)

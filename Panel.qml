@@ -217,26 +217,41 @@ Panel {
       + "\n"
       + "-- Re-apply the per-device pointer sensitivity. Both values are read as\n"
       + "-- data; nothing below is generated from a device name.\n"
+      + "--\n"
+      + "-- Hyprland's config Lua has no lstat and no O_NOFOLLOW, so it cannot\n"
+      + "-- prove what it opened the way touchpad-state can. Two things stand in\n"
+      + "-- for that: touchpad-state refuses to write anything at all unless the\n"
+      + "-- whole directory chain is ours and unwritable by anyone else, so no\n"
+      + "-- one else can put a symlink or a FIFO on these paths; and the reads\n"
+      + "-- below are byte-bounded and the values re-validated here, so a file\n"
+      + "-- that did somehow change still cannot make a reload read without end\n"
+      + "-- or hand hl.device something outside its range.\n"
       + "local paths = require(\"default.hypr.paths\")\n"
       + "local dir = paths.state_home .. \"/omarchy/toggles/hypr\"\n"
-      + "local function read_line(path)\n"
+      + "local function read_value(path, limit)\n"
       + "  local f = io.open(path, \"r\")\n"
       + "  if not f then return nil end\n"
-      + "  local line = f:read(\"*l\")\n"
+      + "  local chunk = f:read(limit)\n"
       + "  f:close()\n"
-      + "  return line\n"
+      + "  if not chunk then return nil end\n"
+      + "  return chunk:match(\"^[^\\r\\n]*\")\n"
       + "end\n"
-      + "local sens_name = read_line(dir .. \"/touchpad-sensitivity-name\")\n"
-      + "local sens_value = tonumber(read_line(dir .. \"/touchpad-sensitivity-value\"))\n"
-      + "if sens_name and sens_name ~= \"\" and sens_value then\n"
+      + "local sens_name = read_value(dir .. \"/touchpad-sensitivity-name\", 256)\n"
+      + "local sens_value = tonumber(read_value(dir .. \"/touchpad-sensitivity-value\", 32))\n"
+      + "if sens_name and sens_name ~= \"\" and not sens_name:find(\"%c\")\n"
+      + "    and sens_value and sens_value >= -1 and sens_value <= 1 then\n"
       + "  hl.device({ name = sens_name, sensitivity = sens_value })\n"
       + "end\n"
 
     // Only booleans and a clamped number reach the file -- no device names or
     // other outside strings are ever interpolated into generated Lua.
-    Quickshell.execDetached(["bash", "-c",
-      "dir=\"$HOME/.local/state/omarchy/toggles/hypr\"; mkdir -p \"$dir\" && " +
-      "cat > \"$dir/touchpad-settings.lua\" <<'OMARCHY_TOUCHPAD_EOF'\n" + lua + "OMARCHY_TOUCHPAD_EOF\n"])
+    //
+    // The write goes through touchpad-state rather than a redirection here: the
+    // path is predictable, so it has to land via an exclusive temporary renamed
+    // over a destination that has been checked, not through a `>` that would
+    // follow a planted symlink or block on a planted FIFO. Passing the content
+    // as an argument also keeps it out of shell parsing entirely.
+    Quickshell.execDetached([stateScript, "write", "touchpad-settings.lua", lua])
   }
 
   function adjustScrollFactor(delta) {
@@ -278,6 +293,11 @@ Panel {
   // is what makes the Lua escaping reviewable and testable.
   readonly property string sensitivityScript:
     String(Qt.resolvedUrl("touchpad-sensitivity")).replace(/^file:\/\//, "")
+
+  // Every read and write of this widget's state files goes through here. See
+  // the header of touchpad-state for what it guarantees and why.
+  readonly property string stateScript:
+    String(Qt.resolvedUrl("touchpad-state")).replace(/^file:\/\//, "")
 
   function commitPointerSpeed() {
     if (!deviceName) return
@@ -404,8 +424,13 @@ Panel {
       "test -f \"$HOME/.local/state/omarchy/toggles/hypr/touchpad-disabled-name\" && echo disabled || echo enabled; " +
       "echo '---SPLIT---'; " +
       // Device options cannot be read back through hyprctl getoption, so the
-      // value we last wrote is the only source of truth for the slider.
-      "cat \"$HOME/.local/state/omarchy/toggles/hypr/touchpad-sensitivity-value\" 2>/dev/null"
+      // value we last wrote is the only source of truth for the slider. Read it
+      // through touchpad-state -- a plain `cat` on this predictable path would
+      // follow a planted symlink, and would hang this whole process on a
+      // planted FIFO, leaving the panel with no state at all. The helper path
+      // is passed as an argument rather than spliced into the script text.
+      "\"$1\" read touchpad-sensitivity-value || true",
+      "touchpad-state", root.stateScript
     ]
     stdout: StdioCollector {
       waitForEnd: true

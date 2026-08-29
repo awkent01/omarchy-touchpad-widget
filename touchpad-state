@@ -1,0 +1,171 @@
+#!/bin/bash
+# Read and write this widget's files in Omarchy's Hyprland toggles state dir.
+#
+# Usage: touchpad-state read  <name>
+#        touchpad-state write <name> <content>
+#
+# Every path this widget persists to is entirely predictable, so both the reads
+# and the writes have to survive an attacker who got to the path first. Two
+# concrete attacks drive the whole design:
+#
+#   * A symlink planted at one of our paths turns a plain `> file` into a write
+#     into whatever else that symlink names, under our own uid.
+#   * A FIFO planted at one of our paths turns a plain `> file` or `cat file`
+#     into an indefinite block -- wedging the widget's state process, or, for
+#     the generated Lua, a Hyprland config reload.
+#
+# So: the directory is proven to be ours and unwritable by anyone else before
+# it is touched at all, reads are no-follow, nonblocking and length-bounded,
+# and writes go to an O_EXCL temporary that is renamed over a destination we
+# have first confirmed is a plain file of ours.
+#
+# Hardcoded to ~/.local/state rather than XDG_STATE_HOME, matching
+# omarchy-toggle-input-device and the sibling toggle tools, which all write
+# there regardless.
+
+set -euo pipefail
+
+STATE_DIR="$HOME/.local/state/omarchy/toggles/hypr"
+
+# The two data files hold one short line each and the generated Lua is a couple
+# of hundred bytes. Anything past this is a tampered file, not one of ours.
+MAX_READ=8192
+
+die() {
+  printf 'touchpad-state: %s\n' "$1" >&2
+  exit 1
+}
+
+usage() {
+  echo "Usage: touchpad-state read <name> | write <name> <content>" >&2
+  exit 1
+}
+
+# lstat, never stat: a symlink has to report as a symlink rather than as
+# whatever it points at, or every check below is checking the wrong file.
+lstat() {
+  stat -c "$1" -- "$2" 2>/dev/null
+}
+
+# Names are ours, not user input, but they end up in a path and in a mktemp
+# template, so pin them to a leading alphanumeric and a safe alphabet -- no
+# slashes, no leading dot, no traversal.
+require_plain_name() {
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid state file name: ${1@Q}"
+}
+
+# A directory only counts as ours if it is a real directory, owned by us, and
+# writable by nobody else. Group- or other-writable is the whole ballgame: it
+# is what lets someone else plant the symlink or FIFO in the first place.
+require_safe_dir() {
+  local dir=$1 info type uid mode
+  info=$(lstat '%F|%u|%a' "$dir") || die "cannot stat $dir"
+  IFS='|' read -r type uid mode <<<"$info"
+  [[ $type == directory ]] || die "$dir is not a directory (it is a $type)"
+  [[ $uid == "$EUID" ]] || die "$dir is not owned by this user"
+  (( (8#$mode & 8#022) == 0 )) || die "$dir is writable by group or other (mode $mode)"
+}
+
+# Validate the whole chain from $HOME down, not just the leaf: a group-writable
+# ancestor lets someone swap out a directory component and defeat every
+# per-file check we make below it.
+ensure_state_dir() {
+  [[ -n ${HOME:-} && $STATE_DIR == "$HOME"/* ]] || die "HOME is not usable"
+
+  # Anything we create is ours alone. Directories that already exist -- Omarchy
+  # creates these at 0755 -- have to prove themselves instead, so we never
+  # chmod a directory we share with the stock toggle tools.
+  (umask 077 && mkdir -p -- "$STATE_DIR") || die "cannot create $STATE_DIR"
+
+  local dir=$STATE_DIR
+  while [[ $dir != "$HOME" ]]; do
+    require_safe_dir "$dir"
+    dir=${dir%/*}
+  done
+  require_safe_dir "$HOME"
+}
+
+cmd_read() {
+  local name=$1
+  local path="$STATE_DIR/$name"
+  local before after data type uid links size
+
+  ensure_state_dir
+
+  # Absent is not an error: callers treat empty output as "never set" and fall
+  # back to their own default.
+  before=$(lstat '%F|%u|%h|%s|%d:%i' "$path") || return 0
+  IFS='|' read -r type uid links size _ <<<"$before"
+
+  [[ $type == "regular file" || $type == "regular empty file" ]] ||
+    die "$name is not a regular file (it is a $type)"
+  [[ $uid == "$EUID" ]] || die "$name is not owned by this user"
+  (( links == 1 )) || die "$name has $links hard links"
+  (( size <= MAX_READ )) || die "$name is $size bytes, refusing to read it"
+
+  # O_NOFOLLOW so a symlink swapped in after the check fails the open outright
+  # instead of being read through, O_NONBLOCK so a FIFO cannot wedge us, and a
+  # byte bound so nothing here can be made to read without end.
+  data=$(dd if="$path" iflag=nofollow,nonblock bs=1 count="$MAX_READ" status=none) ||
+    die "cannot read $name"
+
+  # Bash cannot fstat the descriptor dd read from, so confirm after the fact
+  # that the file we validated is the file that was read: an unchanged device
+  # and inode means nothing was swapped underneath us in that window.
+  after=$(lstat '%F|%u|%h|%s|%d:%i' "$path") || die "$name vanished while being read"
+  [[ $after == "$before" ]] || die "$name changed while being read"
+
+  printf '%s\n' "$data"
+}
+
+cmd_write() {
+  local name=$1 content=$2
+  local path="$STATE_DIR/$name"
+  local info type uid links tmp
+
+  ensure_state_dir
+
+  # Refuse rather than clobber. A destination that is not a plain file of ours
+  # means something else is already sitting on the path, and going ahead anyway
+  # is exactly how a planted symlink or FIFO gets honoured.
+  if info=$(lstat '%F|%u|%h' "$path"); then
+    IFS='|' read -r type uid links <<<"$info"
+    [[ $type == "regular file" || $type == "regular empty file" ]] ||
+      die "refusing to replace $name: it is a $type"
+    [[ $uid == "$EUID" ]] || die "refusing to replace $name: it is not owned by this user"
+    (( links == 1 )) || die "refusing to replace $name: it has $links hard links"
+  fi
+
+  # mktemp opens with O_CREAT|O_EXCL at mode 0600, in the destination's own
+  # directory so the rename below stays within one filesystem. The content is
+  # never visible at the real path half-written, and never lands on a path
+  # anybody else chose.
+  tmp=$(mktemp -- "$STATE_DIR/.$name.XXXXXXXX") || die "cannot create a temporary file in $STATE_DIR"
+  trap 'rm -f -- "$tmp"' EXIT
+
+  # Newline-terminated so these stay ordinary text files: the Lua reader takes
+  # the first line, and a person running `cat` on one gets a clean prompt back.
+  printf '%s' "$content" >"$tmp"
+  [[ $content == *$'\n' ]] || printf '\n' >>"$tmp"
+  sync "$tmp" 2>/dev/null || true
+
+  # rename(2): the destination is replaced whole, and a symlink sitting there
+  # is replaced rather than followed. A reader sees either the old file or the
+  # new one, never a partial write.
+  mv -f -- "$tmp" "$path" || die "cannot install $name"
+  trap - EXIT
+}
+
+case ${1:-} in
+  read)
+    [[ $# -eq 2 ]] || usage
+    require_plain_name "$2"
+    cmd_read "$2"
+    ;;
+  write)
+    [[ $# -eq 3 ]] || usage
+    require_plain_name "$2"
+    cmd_write "$2" "$3"
+    ;;
+  *) usage ;;
+esac
