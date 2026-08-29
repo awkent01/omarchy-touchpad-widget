@@ -15,9 +15,14 @@
 #     the generated Lua, a Hyprland config reload.
 #
 # So: the directory is proven to be ours and unwritable by anyone else before
-# it is touched at all, reads are no-follow, nonblocking and length-bounded,
-# and writes go to an O_EXCL temporary that is renamed over a destination we
-# have first confirmed is a plain file of ours.
+# it is touched at all, reads are no-follow, nonblocking, length-bounded and
+# validated on the descriptor they are read from, and writes go to an O_EXCL
+# temporary that is renamed over a destination we have first confirmed is a
+# plain file of ours.
+#
+# The reader is perl rather than a shell redirection because bash cannot pass
+# O_NOFOLLOW or O_NONBLOCK and cannot fstat what it opened. perl is a hard
+# dependency of the omarchy package, so this adds nothing to install.
 #
 # Hardcoded to ~/.local/state rather than XDG_STATE_HOME, matching
 # omarchy-toggle-input-device and the sibling toggle tools, which all write
@@ -85,37 +90,71 @@ ensure_state_dir() {
   require_safe_dir "$HOME"
 }
 
+# Read one state file, with the open itself doing the enforcing.
+#
+# O_NOFOLLOW makes a symlink fail the open outright rather than be read
+# through; O_NONBLOCK makes a FIFO impossible to block on; and the checks then
+# run against fstat of that very handle rather than a second lstat of the path,
+# so the type, owner, link count and size being checked are unavoidably those
+# of the bytes about to be read. There is no window between the check and the
+# read for anything to be swapped into.
+#
+# Exit codes are how the open reports back, since it has to distinguish "not
+# set yet" from "something is wrong here".
+read_checked() {
+  perl -e '
+    use strict;
+    use warnings;
+    use Fcntl qw(O_RDONLY O_NOFOLLOW O_NONBLOCK);
+    use Fcntl qw(:mode);
+    use Errno qw(ENOENT ELOOP);
+
+    my ($path, $limit) = @ARGV;
+
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or do {
+      exit 3  if $! == ENOENT;   # never written; not an error
+      exit 10 if $! == ELOOP;    # O_NOFOLLOW refused a symlink
+      exit 4;
+    };
+
+    # fstat on the open handle -- the same descriptor the read below uses.
+    my @st = stat($fh) or exit 4;
+    exit 5 unless S_ISREG($st[2]);   # FIFO, directory, device, socket
+    exit 6 unless $st[4] == $>;      # someone else owns it
+    exit 7 unless $st[3] == 1;       # hard-linked elsewhere
+    exit 8 if     $st[7] > $limit;   # implausibly large for our data
+
+    my $buf = "";
+    defined(sysread($fh, $buf, $limit)) or exit 9;
+    print $buf;
+    exit 0;
+  ' -- "$1" "$2"
+}
+
 cmd_read() {
   local name=$1
   local path="$STATE_DIR/$name"
-  local before after data type uid links size
+  local data rc
 
   ensure_state_dir
 
-  # Absent is not an error: callers treat empty output as "never set" and fall
-  # back to their own default.
-  before=$(lstat '%F|%u|%h|%s|%d:%i' "$path") || return 0
-  IFS='|' read -r type uid links size _ <<<"$before"
+  set +e
+  data=$(read_checked "$path" "$MAX_READ")
+  rc=$?
+  set -e
 
-  [[ $type == "regular file" || $type == "regular empty file" ]] ||
-    die "$name is not a regular file (it is a $type)"
-  [[ $uid == "$EUID" ]] || die "$name is not owned by this user"
-  (( links == 1 )) || die "$name has $links hard links"
-  (( size <= MAX_READ )) || die "$name is $size bytes, refusing to read it"
-
-  # O_NOFOLLOW so a symlink swapped in after the check fails the open outright
-  # instead of being read through, O_NONBLOCK so a FIFO cannot wedge us, and a
-  # byte bound so nothing here can be made to read without end.
-  data=$(dd if="$path" iflag=nofollow,nonblock bs=1 count="$MAX_READ" status=none) ||
-    die "cannot read $name"
-
-  # Bash cannot fstat the descriptor dd read from, so confirm after the fact
-  # that the file we validated is the file that was read: an unchanged device
-  # and inode means nothing was swapped underneath us in that window.
-  after=$(lstat '%F|%u|%h|%s|%d:%i' "$path") || die "$name vanished while being read"
-  [[ $after == "$before" ]] || die "$name changed while being read"
-
-  printf '%s\n' "$data"
+  case $rc in
+    0)  printf '%s\n' "$data" ;;
+    # Absent is not an error: callers treat empty output as "never set" and
+    # fall back to their own default.
+    3)  return 0 ;;
+    5)  die "$name is not a regular file" ;;
+    6)  die "$name is not owned by this user" ;;
+    7)  die "$name is hard-linked elsewhere" ;;
+    8)  die "$name is larger than $MAX_READ bytes" ;;
+    10) die "$name is a symlink, refusing to read through it" ;;
+    *)  die "cannot safely read $name" ;;
+  esac
 }
 
 cmd_write() {

@@ -96,12 +96,15 @@ So nothing reads or writes those paths directly. Every access goes through
   create is created `0700`; directories Omarchy already made at `0755` are
   accepted as-is, so the helper never chmods a directory it shares with the
   stock toggle tools. If the chain fails the check, it refuses to write at all.
-- **Reads no-follow, nonblocking, and bounded.** `dd iflag=nofollow,nonblock`
-  with a byte limit, so a symlink fails the open outright rather than being
-  read through, a FIFO cannot block, and nothing can be made to read without
-  end. Because bash cannot `fstat` the descriptor `dd` used, the file's device
-  and inode are compared before and after to confirm that the file checked is
-  the file that was read.
+- **Reads no-follow, nonblocking, bounded, and checked on the descriptor they
+  are read from.** The file is opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, so a
+  symlink fails the open outright rather than being read through and a FIFO
+  cannot block; the type, owner, link count and size are then taken from
+  `fstat` of *that handle* rather than a second `lstat` of the path, so there
+  is no window between the check and the read for anything to be swapped into.
+  This is a few lines of `perl` because bash cannot pass those open flags or
+  `fstat` what it opened -- and `perl` is already a hard dependency of the
+  `omarchy` package, so it adds nothing to install.
 - **Writes through an exclusive temporary.** Content goes to a `mktemp`
   (`O_CREAT|O_EXCL`, mode `0600`) in the destination's own directory and is
   then `rename(2)`d into place, so readers see the old file or the new one and
@@ -237,7 +240,8 @@ shells out to already ships with Omarchy or Hyprland:
 | `omarchy-hw-touchpad` | Omarchy | Resolving the touchpad's device name |
 | `omarchy-toggle-input-device` | Omarchy | Enabling / disabling the touchpad |
 | `omarchy-toggle-touchpad` | Omarchy | Stock touchpad toggle path |
-| `dd`, `stat`, `mktemp` | coreutils | No-follow bounded reads and atomic writes in `touchpad-state` |
+| `stat`, `mktemp`, `mv` | coreutils | Directory validation and atomic writes in `touchpad-state` |
+| `perl` | Already an `omarchy` package dependency | The no-follow, nonblocking, same-descriptor read in `touchpad-state` |
 
 - Omarchy with the Quickshell bar
 - Hyprland (`hyprctl` on `PATH`)
