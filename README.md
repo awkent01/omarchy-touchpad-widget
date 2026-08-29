@@ -185,9 +185,11 @@ After the reload, your touchpad returns to whatever `hypr/input.lua` specifies.
 
 ## Requirements
 
-No third-party dependencies, package installs, or elevated privileges. The
-plugin never calls `sudo` or `pkexec`, installs no services, and bundles no
-binaries. Everything it shells out to already ships with Omarchy or Hyprland:
+No sudo or pkexec is required.
+
+No third-party dependencies, package installs, or elevated privileges. No
+services are installed and no binaries are bundled. Everything the plugin
+shells out to already ships with Omarchy or Hyprland:
 
 | Command | Comes from | Used for |
 | --- | --- | --- |
