@@ -135,11 +135,44 @@ every toggle rather than trusting its optimistic flip.
 ## Install
 
 ```bash
-git clone https://github.com/awkent01/omarchy-touchpad-widget.git \
-  ~/.config/omarchy/plugins/awkent01.touchpad
+omarchy plugin add https://github.com/awkent01/omarchy-touchpad-widget.git --enable
 ```
 
-Then add the widget to your bar from Omarchy's bar settings and reload the shell.
+That clones into `~/.config/omarchy/plugins/awkent01.touchpad` (the directory is
+named from the manifest `id`), validates the manifest, and asks which bar
+section to place the widget in. Without `--enable`, add it later with:
+
+```bash
+omarchy plugin enable awkent01.touchpad
+```
+
+## Uninstall
+
+If you currently have the touchpad **disabled**, re-enable it first -- otherwise
+it stays disabled after the widget is gone and you will need
+`omarchy-toggle-input-device touchpad on` to get it back.
+
+```bash
+omarchy plugin remove awkent01.touchpad
+```
+
+That removes the plugin directory but *not* the settings this widget persists.
+They live outside the plugin on purpose, so that a config reload cannot wipe
+them (see [Settings persistence](#settings-persistence)), which also means they
+outlive the plugin and keep being applied on every reload. To drop them too:
+
+```bash
+rm -f ~/.local/state/omarchy/toggles/hypr/touchpad-settings.lua \
+      ~/.local/state/omarchy/toggles/hypr/touchpad-sensitivity-name \
+      ~/.local/state/omarchy/toggles/hypr/touchpad-sensitivity-value
+hyprctl reload
+```
+
+Those three files are the only things this plugin writes outside its own
+directory. Leave the other files in that directory alone -- `flags.lua` and
+`touchpad-disabled-name` belong to Omarchy itself, not to this plugin.
+
+After the reload, your touchpad returns to whatever `hypr/input.lua` specifies.
 
 ## Files
 
@@ -152,8 +185,23 @@ Then add the widget to your bar from Omarchy's bar settings and reload the shell
 
 ## Requirements
 
+No third-party dependencies, package installs, or elevated privileges. The
+plugin never calls `sudo` or `pkexec`, installs no services, and bundles no
+binaries. Everything it shells out to already ships with Omarchy or Hyprland:
+
+| Command | Comes from | Used for |
+| --- | --- | --- |
+| `hyprctl` | Hyprland | Reading device state; applying settings via `eval` |
+| `omarchy-hw-touchpad` | Omarchy | Resolving the touchpad's device name |
+| `omarchy-toggle-input-device` | Omarchy | Enabling / disabling the touchpad |
+| `omarchy-toggle-touchpad` | Omarchy | Stock touchpad toggle path |
+
 - Omarchy with the Quickshell bar
 - Hyprland (`hyprctl` on `PATH`)
+
+The only files written outside the plugin directory are the three listed under
+[Uninstall](#uninstall). No existing user configuration is read for writing or
+overwritten, and nothing is written except in response to a control you operate.
 
 ## Development
 
