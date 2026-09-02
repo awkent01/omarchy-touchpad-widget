@@ -1,7 +1,24 @@
 // Touchpad state helpers.
 
+// Ceilings on everything that arrives from outside this file. hyprctl output is
+// already byte-capped at the producer (see stateProc in Panel.qml), and a device
+// name comes from a USB descriptor, but nothing downstream should depend on that
+// having happened -- a parser that will chew on an unbounded string is a parser
+// that can be made to hang the shell.
+var MAX_JSON_CHARS = 262144
+var MAX_DEVICE_ENTRIES = 512
+var MAX_DEVICE_NAME_CHARS = 128
+var MAX_DEVICE_NAME_BYTES = 256
+
+// Refuse rather than truncate: a truncated device name is a name that matches
+// the wrong device, which is worse than not matching one at all.
+function tooLarge(json) {
+  return String(json || "").length > MAX_JSON_CHARS
+}
+
 // Parse hyprctl getoption JSON for a boolean option.
 function parseBool(json) {
+  if (tooLarge(json)) return false
   try {
     var obj = JSON.parse(json)
     return !!obj.bool
@@ -12,6 +29,7 @@ function parseBool(json) {
 
 // Parse hyprctl getoption JSON for a float option.
 function parseFloat(json) {
+  if (tooLarge(json)) return 0
   try {
     var obj = JSON.parse(json)
     return Number(obj.float) || 0
@@ -21,14 +39,25 @@ function parseFloat(json) {
 }
 
 // Parse hyprctl devices JSON and return the touchpad device name.
+//
+// The list is capped and so is each name: this JSON is the one input here that
+// an attacker with a USB port has a hand in, and the name it yields is used to
+// address a device and is embedded in generated Lua. A name carrying control
+// characters is rejected outright rather than escaped -- no real device needs
+// one, and it keeps the value printable everywhere it lands.
 function parseTouchpadDevice(json) {
+  if (tooLarge(json)) return ""
   try {
     var obj = JSON.parse(json)
     var mice = obj.mice || []
-    for (var i = 0; i < mice.length; i++) {
-      var name = String(mice[i].name || "").toLowerCase()
+    var limit = Math.min(mice.length, MAX_DEVICE_ENTRIES)
+    for (var i = 0; i < limit; i++) {
+      var raw = String(mice[i].name || "")
+      if (raw.length === 0 || raw.length > MAX_DEVICE_NAME_CHARS) continue
+      if (/[\x00-\x1f\x7f]/.test(raw)) continue
+      var name = raw.toLowerCase()
       if (name.indexOf("touchpad") !== -1 || name.indexOf("trackpad") !== -1)
-        return mice[i].name
+        return raw
     }
   } catch (e) {}
   return ""

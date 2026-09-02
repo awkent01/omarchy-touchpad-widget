@@ -255,6 +255,7 @@ shells out to already ships with Omarchy or Hyprland:
 | `omarchy-hw-touchpad` | Omarchy | Resolving the touchpad's device name |
 | `omarchy-toggle-input-device` | Omarchy | Enabling / disabling the touchpad |
 | `omarchy-toggle-touchpad` | Omarchy | Stock touchpad toggle path |
+| `timeout`, `head` | coreutils | Deadlines and output ceilings on everything the widget spawns |
 | `perl` | Already an `omarchy` package dependency | `touchpad-state`: the descriptor-anchored walk, and the no-follow, nonblocking, same-descriptor reads and writes |
 
 - Omarchy with the Quickshell bar

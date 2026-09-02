@@ -127,6 +127,20 @@ Panel {
     if (focusSection === "clickfinger") { toggleClickfingerBehavior(); return }
   }
 
+  // ---- Process discipline ----
+  //
+  // Nothing this widget launches may outlive its usefulness. Every spawn goes
+  // through here, so a wedged hyprctl, a stuck omarchy-* tool or a helper
+  // blocked on something unforeseen is reaped rather than accumulating one
+  // orphan per click.
+  //
+  // timeout(1) without --foreground runs the command in its own process group
+  // and signals that group, so a shell's children die with it instead of being
+  // left behind; -k follows SIGTERM with SIGKILL for anything that ignores it.
+  function bounded(seconds, argv) {
+    return ["timeout", "-k", "2", String(seconds)].concat(argv)
+  }
+
   // ---- Actions ----
   // The reload chained onto the enable is defensive, not a proven fix.
   //
@@ -149,10 +163,10 @@ Panel {
     var next = !touchpadEnabled
     touchpadEnabled = next
     if (next) {
-      Quickshell.execDetached(["bash", "-c",
-        "omarchy-toggle-input-device touchpad on && hyprctl reload >/dev/null"])
+      Quickshell.execDetached(bounded(12, ["bash", "-c",
+        "omarchy-toggle-input-device touchpad on && hyprctl reload >/dev/null 2>&1"]))
     } else {
-      Quickshell.execDetached(["omarchy-toggle-input-device", "touchpad", "off"])
+      Quickshell.execDetached(bounded(12, ["omarchy-toggle-input-device", "touchpad", "off"]))
     }
     // The optimistic flip above is a guess until the marker file and the
     // compositor agree. Re-read shortly after so a failed enable corrects
@@ -200,7 +214,8 @@ Panel {
       if (!isFinite(n)) return
       luaValue = n.toFixed(1)
     }
-    Quickshell.execDetached(["hyprctl", "eval", "hl.config({ input = { touchpad = { " + option + " = " + luaValue + " } } })"])
+    Quickshell.execDetached(bounded(5,
+      ["hyprctl", "eval", "hl.config({ input = { touchpad = { " + option + " = " + luaValue + " } } })"]))
     persistSettings()
   }
 
@@ -265,7 +280,7 @@ Panel {
     // over a destination that has been checked, not through a `>` that would
     // follow a planted symlink or block on a planted FIFO. Passing the content
     // as an argument also keeps it out of shell parsing entirely.
-    Quickshell.execDetached([stateScript, "write", "touchpad-settings.lua", lua])
+    Quickshell.execDetached(bounded(10, [stateScript, "write", "touchpad-settings.lua", lua]))
   }
 
   function adjustScrollFactor(delta) {
@@ -313,11 +328,19 @@ Panel {
   readonly property string stateScript:
     String(Qt.resolvedUrl("touchpad-state")).replace(/^file:\/\//, "")
 
+  // Randomised per shell start, and passed to the collector as an argument
+  // rather than baked into its script. hyprctl's device list is the one
+  // free-form string in that stream, so a device named after a fixed marker
+  // could otherwise shift every field after it by one and hand the parser a
+  // value from the wrong slot.
+  readonly property string splitMarker:
+    "---SPLIT-" + Math.floor(Math.random() * 0x7fffffff).toString(16) + "---"
+
   function commitPointerSpeed() {
     if (!deviceName) return
     var v = Model.clampSensitivity(pendingPointerSpeed)
     pointerSpeed = v
-    Quickshell.execDetached([sensitivityScript, v.toFixed(1)])
+    Quickshell.execDetached(bounded(10, [sensitivityScript, v.toFixed(1)]))
     persistSettings()
   }
 
@@ -426,15 +449,27 @@ Panel {
   }
 
   // ---- State process: reads all touchpad options in one shot ----
+  //
+  // Bounded on both axes, because neither bound comes for free here.
+  //
+  // Time: each hyprctl gets its own short deadline, so one unresponsive call
+  // cannot stall the others, and the whole run gets an outer one as a backstop.
+  // A hung collector is not merely slow -- refresh() will not start a second
+  // run while one is live, so the panel would sit on stale state indefinitely.
+  //
+  // Bytes: every producer is capped at the point it writes. StdioCollector has
+  // no size limit of its own, so an unbounded writer on this pipe is an
+  // unbounded buffer inside the shell -- 64K is already far more device JSON
+  // than any real machine produces, and the option reads are a line each.
   Process {
     id: stateProc
-    command: ["bash", "-c",
-      "hyprctl devices -j 2>/dev/null; echo '---SPLIT---'; " +
-      "hyprctl getoption input:touchpad:natural_scroll -j 2>/dev/null; echo '---SPLIT---'; " +
-      "hyprctl getoption input:touchpad:scroll_factor -j 2>/dev/null; echo '---SPLIT---'; " +
-      "hyprctl getoption 'input:touchpad:tap-to-click' -j 2>/dev/null; echo '---SPLIT---'; " +
-      "hyprctl getoption input:touchpad:disable_while_typing -j 2>/dev/null; echo '---SPLIT---'; " +
-      "hyprctl getoption input:touchpad:clickfinger_behavior -j 2>/dev/null; echo '---SPLIT---'; " +
+    command: root.bounded(15, ["bash", "-c",
+      "timeout 2 hyprctl devices -j 2>/dev/null | head -c 65536; echo \"$2\"; " +
+      "timeout 2 hyprctl getoption input:touchpad:natural_scroll -j 2>/dev/null | head -c 4096; echo \"$2\"; " +
+      "timeout 2 hyprctl getoption input:touchpad:scroll_factor -j 2>/dev/null | head -c 4096; echo \"$2\"; " +
+      "timeout 2 hyprctl getoption 'input:touchpad:tap-to-click' -j 2>/dev/null | head -c 4096; echo \"$2\"; " +
+      "timeout 2 hyprctl getoption input:touchpad:disable_while_typing -j 2>/dev/null | head -c 4096; echo \"$2\"; " +
+      "timeout 2 hyprctl getoption input:touchpad:clickfinger_behavior -j 2>/dev/null | head -c 4096; echo \"$2\"; " +
       // Omarchy's own marker file, tested rather than read: this yields a
       // boolean and opens nothing, so a planted symlink or FIFO here can at
       // worst mislabel the toggle for one refresh -- it cannot redirect a
@@ -442,20 +477,24 @@ Panel {
       // omarchy-toggle-input-device, so hardening how it is *written* belongs
       // upstream rather than in a plugin that only reads it.
       "test -f \"$HOME/.local/state/omarchy/toggles/hypr/touchpad-disabled-name\" && echo disabled || echo enabled; " +
-      "echo '---SPLIT---'; " +
+      "echo \"$2\"; " +
       // Device options cannot be read back through hyprctl getoption, so the
       // value we last wrote is the only source of truth for the slider. Read it
       // through touchpad-state -- a plain `cat` on this predictable path would
       // follow a planted symlink, and would hang this whole process on a
       // planted FIFO, leaving the panel with no state at all. The helper path
-      // is passed as an argument rather than spliced into the script text.
-      "\"$1\" read touchpad-sensitivity-value || true",
-      "touchpad-state", root.stateScript
-    ]
+      // and the marker are passed as arguments rather than spliced into the
+      // script text.
+      "timeout 5 \"$1\" read touchpad-sensitivity-value 2>/dev/null | head -c 4096 || true",
+      "touchpad-state", root.stateScript, root.splitMarker
+    ])
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var parts = String(text || "").split("---SPLIT---")
+        // A short read means the run was cut off partway -- a deadline fired,
+        // or a producer died. Keep the state we already have rather than
+        // reassigning fields from slots that were never filled.
+        var parts = String(text || "").split(root.splitMarker)
         if (parts.length < 8) return
 
         root.deviceName = Model.parseTouchpadDevice(parts[0])

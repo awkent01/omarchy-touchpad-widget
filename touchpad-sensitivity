@@ -15,10 +15,17 @@
 
 set -euo pipefail
 
-# Persistence goes through touchpad-state, which validates the state directory
-# and does the no-follow, exclusive-temporary, atomic-rename dance. Nothing here
-# writes to a predictable path directly.
+# Persistence goes through touchpad-state, which walks to the state directory
+# on held descriptors and does the no-follow, exclusive-temporary,
+# atomic-rename dance. Nothing here writes to a predictable path directly.
 STATE="$(dirname -- "$(readlink -f -- "$0")")/touchpad-state"
+
+# Deadlines and output ceilings for everything spawned below. A helper the
+# widget fires and forgets must not be able to sit forever holding a device
+# lookup open; timeout(1) without --foreground reaps the whole process group,
+# so hyprctl children go with it.
+DEADLINE=5
+MAX_NAME_BYTES=256
 
 sens="${1:-}"
 
@@ -29,10 +36,18 @@ if [[ ! $sens =~ ^-?(0(\.[0-9])?|1(\.0)?)$ ]]; then
   exit 1
 fi
 
-device="$(omarchy-hw-touchpad)"
+# Bounded in time and in bytes: a lookup that hangs must not hang us, and one
+# that produces without end must not be read without end.
+device="$(timeout -k 2 "$DEADLINE" omarchy-hw-touchpad 2>/dev/null | head -c "$MAX_NAME_BYTES" || true)"
+device="${device%$'\n'}"
 
 if [[ -z $device ]]; then
   echo "No touchpad device found" >&2
+  exit 1
+fi
+
+if (( ${#device} > MAX_NAME_BYTES )); then
+  echo "Touchpad device name is implausibly long" >&2
   exit 1
 fi
 
@@ -45,9 +60,10 @@ fi
 quoted=${device//\\/\\\\}
 quoted=${quoted//\"/\\\"}
 
-hyprctl eval "hl.device({ name = \"$quoted\", sensitivity = $sens })" >/dev/null
+timeout -k 2 "$DEADLINE" \
+  hyprctl eval "hl.device({ name = \"$quoted\", sensitivity = $sens })" >/dev/null
 
 # Persist as data, never as generated code. touchpad-settings.lua reads these
 # back on every config reload.
-"$STATE" write touchpad-sensitivity-name "$device"
-"$STATE" write touchpad-sensitivity-value "$sens"
+timeout -k 2 "$DEADLINE" "$STATE" write touchpad-sensitivity-name "$device"
+timeout -k 2 "$DEADLINE" "$STATE" write touchpad-sensitivity-value "$sens"
