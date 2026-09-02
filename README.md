@@ -89,28 +89,43 @@ wedging the widget's state process, or a Hyprland config reload.
 So nothing reads or writes those paths directly. Every access goes through
 `touchpad-state`, which:
 
-- **Validates the directory first.** Every component from `$HOME` down to
-  `toggles/hypr` must be a real directory, owned by you, and writable by nobody
-  else. That is the structural defense: if no one else can write to the
-  directory, no one else can plant anything in it. Anything the helper has to
-  create is created `0700`; directories Omarchy already made at `0755` are
-  accepted as-is, so the helper never chmods a directory it shares with the
-  stock toggle tools. If the chain fails the check, it refuses to write at all.
+- **Walks to the directory on held descriptors.** Starting at `/`, each
+  component is opened with `O_DIRECTORY|O_NOFOLLOW` and checked -- a real
+  directory, owned by root or by you, writable by nobody else -- and every
+  descriptor stays open for the life of the process. That is the structural
+  defense: if no one else can write to the directory, no one else can plant
+  anything in it. Anything the helper creates is created `0700`; directories
+  Omarchy already made at `0755` are accepted as-is, so the helper never chmods
+  a directory it shares with the stock toggle tools.
+
+  Crucially, the leaf open, create, rename and cleanup all happen *relative to
+  the descriptor that was checked*, not by handing the pathname to another
+  command. Validating a path and then re-resolving it walks the chain a second
+  time, and the second walk can be a different chain -- an intermediate
+  directory swapped out in between sends a perfectly validated operation
+  somewhere else. There is no second resolution here to race.
 - **Reads no-follow, nonblocking, bounded, and checked on the descriptor they
   are read from.** The file is opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, so a
   symlink fails the open outright rather than being read through and a FIFO
   cannot block; the type, owner, link count and size are then taken from
   `fstat` of *that handle* rather than a second `lstat` of the path, so there
   is no window between the check and the read for anything to be swapped into.
-  This is a few lines of `perl` because bash cannot pass those open flags or
-  `fstat` what it opened -- and `perl` is already a hard dependency of the
-  `omarchy` package, so it adds nothing to install.
-- **Writes through an exclusive temporary.** Content goes to a `mktemp`
-  (`O_CREAT|O_EXCL`, mode `0600`) in the destination's own directory and is
+- **Writes through an exclusive temporary.** Content goes to an
+  `O_CREAT|O_EXCL` temporary (mode `0600`) in the verified directory and is
   then `rename(2)`d into place, so readers see the old file or the new one and
   never a partial write. The destination is checked first and the write is
   *refused* -- not forced -- if anything other than a plain, single-linked file
   of yours is sitting on the path.
+
+The helper is one `perl` program rather than a shell script precisely because
+of the first bullet: bash cannot pass those open flags, cannot `fstat` what it
+opened, and cannot keep a directory descriptor to work relative to -- and a
+script that shells out to `stat`, `mktemp` and `mv` re-resolves the path once
+per command. `perl` is already a hard dependency of the `omarchy` package, so
+this adds nothing to install. Descriptor-relative work is spelled
+`/proc/self/fd/N/leaf`, which the kernel resolves straight to the inode the
+descriptor already holds; it is `openat(2)`/`renameat(2)` in the spelling Perl
+core gives us.
 
 `touchpad-settings.lua` is loaded by Hyprland's Lua config, which has no
 `lstat` and no `O_NOFOLLOW` and so cannot make those guarantees itself. The
@@ -240,8 +255,7 @@ shells out to already ships with Omarchy or Hyprland:
 | `omarchy-hw-touchpad` | Omarchy | Resolving the touchpad's device name |
 | `omarchy-toggle-input-device` | Omarchy | Enabling / disabling the touchpad |
 | `omarchy-toggle-touchpad` | Omarchy | Stock touchpad toggle path |
-| `stat`, `mktemp`, `mv` | coreutils | Directory validation and atomic writes in `touchpad-state` |
-| `perl` | Already an `omarchy` package dependency | The no-follow, nonblocking, same-descriptor read in `touchpad-state` |
+| `perl` | Already an `omarchy` package dependency | `touchpad-state`: the descriptor-anchored walk, and the no-follow, nonblocking, same-descriptor reads and writes |
 
 - Omarchy with the Quickshell bar
 - Hyprland (`hyprctl` on `PATH`)

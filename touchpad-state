@@ -1,11 +1,11 @@
-#!/bin/bash
+#!/usr/bin/perl
 # Read and write this widget's files in Omarchy's Hyprland toggles state dir.
 #
 # Usage: touchpad-state read  <name>
 #        touchpad-state write <name> <content>
 #
 # Every path this widget persists to is entirely predictable, so both the reads
-# and the writes have to survive an attacker who got to the path first. Two
+# and the writes have to survive an attacker who got to the path first. Three
 # concrete attacks drive the whole design:
 #
 #   * A symlink planted at one of our paths turns a plain `> file` into a write
@@ -13,81 +13,179 @@
 #   * A FIFO planted at one of our paths turns a plain `> file` or `cat file`
 #     into an indefinite block -- wedging the widget's state process, or, for
 #     the generated Lua, a Hyprland config reload.
+#   * A directory component swapped out *after* it was checked sends an
+#     otherwise perfectly validated leaf operation somewhere else entirely.
 #
-# So: the directory is proven to be ours and unwritable by anyone else before
-# it is touched at all, reads are no-follow, nonblocking, length-bounded and
-# validated on the descriptor they are read from, and writes go to an O_EXCL
-# temporary that is renamed over a destination we have first confirmed is a
-# plain file of ours.
+# The third is why this is one Perl program rather than a shell script calling
+# stat, mktemp and mv. Checking a path and then handing that same path to the
+# next command re-resolves it from the root every time, so each command walks a
+# chain that may no longer be the one that passed the check. Instead the walk
+# below descends from / one component at a time with O_DIRECTORY|O_NOFOLLOW,
+# keeps every descriptor open for the life of the process, and performs the
+# leaf open/create/rename/unlink *relative to the descriptor it verified*.
+# There is no second pathname resolution for anyone to race.
 #
-# The reader is perl rather than a shell redirection because bash cannot pass
-# O_NOFOLLOW or O_NONBLOCK and cannot fstat what it opened. perl is a hard
-# dependency of the omarchy package, so this adds nothing to install.
+# Descriptor-relative work is spelled "/proc/self/fd/N/leaf". That path is not
+# a re-walk: the kernel resolves /proc/self/fd/N straight to the inode the
+# descriptor already holds, so it is openat(2)/renameat(2)/unlinkat(2) with the
+# spelling Perl gives us. Perl core exposes no *at() syscalls directly.
+#
+# Reads are additionally no-follow, nonblocking, length-bounded and validated
+# on fstat of the very descriptor the bytes come from; writes go to an O_EXCL
+# temporary in the verified directory and are renamed over a destination first
+# confirmed to be a plain file of ours.
+#
+# perl is a hard dependency of the omarchy package, so this adds nothing to
+# install.
 #
 # Hardcoded to ~/.local/state rather than XDG_STATE_HOME, matching
 # omarchy-toggle-input-device and the sibling toggle tools, which all write
 # there regardless.
 
-set -euo pipefail
+use strict;
+use warnings;
 
-STATE_DIR="$HOME/.local/state/omarchy/toggles/hypr"
+use Fcntl qw(O_RDONLY O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK O_DIRECTORY);
+use Fcntl qw(:mode);
+use Errno qw(ENOENT ELOOP EEXIST);
+use Cwd ();
+use IO::Handle ();
 
-# The two data files hold one short line each and the generated Lua is a couple
-# of hundred bytes. Anything past this is a tampered file, not one of ours.
-MAX_READ=8192
+# The state dir, as components below $HOME. Never joined into a string and
+# re-resolved: the walk consumes it one component at a time.
+my @STATE_SUBPATH = qw(.local state omarchy toggles hypr);
 
-die() {
-  printf 'touchpad-state: %s\n' "$1" >&2
-  exit 1
+# The data files hold one short line each and the generated Lua is well under a
+# kilobyte. Anything past these is a tampered file, not one of ours.
+my $MAX_READ  = 8192;
+my $MAX_WRITE = 65536;
+
+# A hard whole-process deadline. Nothing here can legitimately block -- the
+# opens are O_NONBLOCK and there are no subprocesses -- but a helper that can
+# hang is a helper that can wedge the caller waiting on it, so put a ceiling on
+# the whole run rather than trusting that analysis.
+my $DEADLINE = 10;
+
+sub fail {
+  my ($msg) = @_;
+  print STDERR "touchpad-state: $msg\n";
+  exit 1;
 }
 
-usage() {
-  echo "Usage: touchpad-state read <name> | write <name> <content>" >&2
-  exit 1
+sub usage {
+  print STDERR "Usage: touchpad-state read <name> | write <name> <content>\n";
+  exit 1;
 }
 
-# lstat, never stat: a symlink has to report as a symlink rather than as
-# whatever it points at, or every check below is checking the wrong file.
-lstat() {
-  stat -c "$1" -- "$2" 2>/dev/null
+$SIG{ALRM} = sub { fail("timed out after ${DEADLINE}s") };
+alarm $DEADLINE;
+
+# openat(2) et al., spelled as a path. See the header: this resolves through
+# the held descriptor, not through the pathname that descriptor came from.
+sub at {
+  my ($fh, $leaf) = @_;
+  return "/proc/self/fd/" . fileno($fh) . "/" . $leaf;
 }
 
-# Names are ours, not user input, but they end up in a path and in a mktemp
-# template, so pin them to a leading alphanumeric and a safe alphabet -- no
+# Names are ours, not user input, but they end up in a path and in a temporary
+# file name, so pin them to a leading alphanumeric and a safe alphabet -- no
 # slashes, no leading dot, no traversal.
-require_plain_name() {
-  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid state file name: ${1@Q}"
+sub require_plain_name {
+  my ($name) = @_;
+  $name =~ /\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/
+    or fail("invalid state file name: '$name'");
 }
 
-# A directory only counts as ours if it is a real directory, owned by us, and
-# writable by nobody else. Group- or other-writable is the whole ballgame: it
-# is what lets someone else plant the symlink or FIFO in the first place.
-require_safe_dir() {
-  local dir=$1 info type uid mode
-  info=$(lstat '%F|%u|%a' "$dir") || die "cannot stat $dir"
-  IFS='|' read -r type uid mode <<<"$info"
-  [[ $type == directory ]] || die "$dir is not a directory (it is a $type)"
-  [[ $uid == "$EUID" ]] || die "$dir is not owned by this user"
-  (( (8#$mode & 8#022) == 0 )) || die "$dir is writable by group or other (mode $mode)"
+# Every descriptor the walk opens, kept open until the process exits. Holding
+# them is the point: a closed descriptor is a pathname again.
+my @held;
+
+# A directory only counts as ours if it is a real directory, owned by root or
+# by us, and writable by nobody else. Group- or other-writable is the whole
+# ballgame: it is what lets someone else plant the symlink or FIFO, or swap a
+# component, in the first place.
+#
+# This runs on fstat of the open descriptor, so what it validates is the
+# directory the process is actually holding, not whatever the name resolves to
+# a moment later.
+sub check_dir_fd {
+  my ($fh, $label) = @_;
+  my @st = stat($fh) or fail("cannot stat $label");
+  S_ISDIR($st[2]) or fail("$label is not a directory");
+  ($st[4] == 0 || $st[4] == $>)
+    or fail("$label is owned by uid $st[4], which is neither root nor this user");
+  ($st[2] & 022) == 0
+    or fail(sprintf("%s is writable by group or other (mode %04o)", $label, $st[2] & 07777));
 }
 
-# Validate the whole chain from $HOME down, not just the leaf: a group-writable
-# ancestor lets someone swap out a directory component and defeat every
-# per-file check we make below it.
-ensure_state_dir() {
-  [[ -n ${HOME:-} && $STATE_DIR == "$HOME"/* ]] || die "HOME is not usable"
+# Open one component relative to the descriptor for its parent, creating it
+# first if we are allowed to and it is not there.
+#
+# O_NOFOLLOW means a symlink in the chain fails the open rather than being
+# followed, and because the open is relative to $parent, the component that
+# gets opened is unavoidably a child of the directory already verified.
+sub descend {
+  my ($parent, $comp, $trail, $may_create) = @_;
+  fail("refusing to walk through '$comp'") if $comp eq '.' || $comp eq '..';
 
-  # Anything we create is ours alone. Directories that already exist -- Omarchy
-  # creates these at 0755 -- have to prove themselves instead, so we never
-  # chmod a directory we share with the stock toggle tools.
-  (umask 077 && mkdir -p -- "$STATE_DIR") || die "cannot create $STATE_DIR"
+  $$trail .= "/$comp";
+  my $label = $$trail;
+  my $path  = at($parent, $comp);
 
-  local dir=$STATE_DIR
-  while [[ $dir != "$HOME" ]]; do
-    require_safe_dir "$dir"
-    dir=${dir%/*}
-  done
-  require_safe_dir "$HOME"
+  my $fh;
+  if (!sysopen($fh, $path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) {
+    my $err = $!;
+    fail("cannot open $label: $err") unless $may_create && $err == ENOENT;
+
+    # 0700: anything this helper creates is ours alone. Directories that
+    # already exist prove themselves through check_dir_fd instead, so we never
+    # chmod one we share with the stock toggle tools -- Omarchy creates these
+    # at 0755.
+    if (!mkdir($path, 0700)) {
+      my $mkerr = $!;
+      fail("cannot create $label: $mkerr") unless $mkerr == EEXIST;
+    }
+    sysopen($fh, $path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+      or fail("cannot open $label after creating it: $!");
+  }
+
+  push @held, $fh;
+  check_dir_fd($fh, $label);
+  return $fh;
+}
+
+# Walk from / to the state dir, returning a descriptor for it.
+#
+# $HOME is canonicalised once up front so the no-follow walk can insist on real
+# directories at every step without breaking a legitimately symlinked home.
+# Canonicalising is itself a pathname resolution and so is itself racy, but it
+# cannot be *usefully* raced: whatever the walk ends up holding still has to be
+# a chain of directories owned by root or us and writable by nobody else, and
+# an attacker under another uid cannot produce one of those.
+sub open_state_dir {
+  my $home = $ENV{HOME};
+  defined $home && length $home && $home =~ m{\A/}
+    or fail("HOME is not set to an absolute path");
+
+  -d "/proc/self/fd"
+    or fail("/proc is not mounted, so directory descriptors cannot be anchored");
+
+  my $real = Cwd::realpath($home)
+    or fail("cannot resolve HOME ($home)");
+
+  sysopen(my $root, "/", O_RDONLY | O_DIRECTORY) or fail("cannot open /: $!");
+  push @held, $root;
+  check_dir_fd($root, "/");
+
+  my $trail = "";
+  my $cur   = $root;
+
+  # Above $HOME the components are the system's; below it they are ours, and
+  # ours are the only ones this helper will create.
+  $cur = descend($cur, $_, \$trail, 0) for grep { length } split m{/}, $real;
+  $cur = descend($cur, $_, \$trail, 1) for @STATE_SUBPATH;
+
+  return $cur;
 }
 
 # Read one state file, with the open itself doing the enforcing.
@@ -98,113 +196,111 @@ ensure_state_dir() {
 # so the type, owner, link count and size being checked are unavoidably those
 # of the bytes about to be read. There is no window between the check and the
 # read for anything to be swapped into.
-#
-# Exit codes are how the open reports back, since it has to distinguish "not
-# set yet" from "something is wrong here".
-read_checked() {
-  perl -e '
-    use strict;
-    use warnings;
-    use Fcntl qw(O_RDONLY O_NOFOLLOW O_NONBLOCK);
-    use Fcntl qw(:mode);
-    use Errno qw(ENOENT ELOOP);
+sub cmd_read {
+  my ($dir, $name) = @_;
 
-    my ($path, $limit) = @ARGV;
-
-    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or do {
-      exit 3  if $! == ENOENT;   # never written; not an error
-      exit 10 if $! == ELOOP;    # O_NOFOLLOW refused a symlink
-      exit 4;
-    };
-
-    # fstat on the open handle -- the same descriptor the read below uses.
-    my @st = stat($fh) or exit 4;
-    exit 5 unless S_ISREG($st[2]);   # FIFO, directory, device, socket
-    exit 6 unless $st[4] == $>;      # someone else owns it
-    exit 7 unless $st[3] == 1;       # hard-linked elsewhere
-    exit 8 if     $st[7] > $limit;   # implausibly large for our data
-
-    my $buf = "";
-    defined(sysread($fh, $buf, $limit)) or exit 9;
-    print $buf;
-    exit 0;
-  ' -- "$1" "$2"
-}
-
-cmd_read() {
-  local name=$1
-  local path="$STATE_DIR/$name"
-  local data rc
-
-  ensure_state_dir
-
-  set +e
-  data=$(read_checked "$path" "$MAX_READ")
-  rc=$?
-  set -e
-
-  case $rc in
-    0)  printf '%s\n' "$data" ;;
+  my $fh;
+  if (!sysopen($fh, at($dir, $name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) {
+    my $err = $!;
     # Absent is not an error: callers treat empty output as "never set" and
     # fall back to their own default.
-    3)  return 0 ;;
-    5)  die "$name is not a regular file" ;;
-    6)  die "$name is not owned by this user" ;;
-    7)  die "$name is hard-linked elsewhere" ;;
-    8)  die "$name is larger than $MAX_READ bytes" ;;
-    10) die "$name is a symlink, refusing to read through it" ;;
-    *)  die "cannot safely read $name" ;;
-  esac
+    exit 0 if $err == ENOENT;
+    fail("$name is a symlink, refusing to read through it") if $err == ELOOP;
+    fail("cannot safely read $name: $err");
+  }
+
+  my @st = stat($fh) or fail("cannot stat $name");
+  S_ISREG($st[2])     or fail("$name is not a regular file");   # FIFO, dir, device, socket
+  $st[4] == $>        or fail("$name is not owned by this user");
+  $st[3] == 1         or fail("$name is hard-linked elsewhere");
+  $st[7] <= $MAX_READ or fail("$name is larger than $MAX_READ bytes");
+
+  my $buf = "";
+  defined(sysread($fh, $buf, $MAX_READ)) or fail("cannot read $name: $!");
+
+  $buf =~ s/\n+\z//;
+  print "$buf\n";
 }
 
-cmd_write() {
-  local name=$1 content=$2
-  local path="$STATE_DIR/$name"
-  local info type uid links tmp
+sub cmd_write {
+  my ($dir, $name, $content) = @_;
 
-  ensure_state_dir
+  length($content) <= $MAX_WRITE
+    or fail("refusing to write $name: content exceeds $MAX_WRITE bytes");
 
-  # Refuse rather than clobber. A destination that is not a plain file of ours
-  # means something else is already sitting on the path, and going ahead anyway
-  # is exactly how a planted symlink or FIFO gets honoured.
-  if info=$(lstat '%F|%u|%h' "$path"); then
-    IFS='|' read -r type uid links <<<"$info"
-    [[ $type == "regular file" || $type == "regular empty file" ]] ||
-      die "refusing to replace $name: it is a $type"
-    [[ $uid == "$EUID" ]] || die "refusing to replace $name: it is not owned by this user"
-    (( links == 1 )) || die "refusing to replace $name: it has $links hard links"
-  fi
+  # Refuse rather than clobber. This is advisory -- the rename below replaces
+  # the destination atomically and never follows a symlink sitting on it, so it
+  # is not what makes the write safe. What makes it safe is that $dir is a
+  # descriptor whose entire chain was proven ours. But a destination that is
+  # not a plain file of ours still means something unexpected is on the path,
+  # and going ahead anyway would destroy the evidence.
+  if (my @st = lstat(at($dir, $name))) {
+    S_ISREG($st[2]) or fail("refusing to replace $name: it is not a regular file");
+    $st[4] == $>    or fail("refusing to replace $name: it is not owned by this user");
+    $st[3] == 1     or fail("refusing to replace $name: it has $st[3] hard links");
+  }
 
-  # mktemp opens with O_CREAT|O_EXCL at mode 0600, in the destination's own
-  # directory so the rename below stays within one filesystem. The content is
-  # never visible at the real path half-written, and never lands on a path
-  # anybody else chose.
-  tmp=$(mktemp -- "$STATE_DIR/.$name.XXXXXXXX") || die "cannot create a temporary file in $STATE_DIR"
-  trap 'rm -f -- "$tmp"' EXIT
+  # O_CREAT|O_EXCL at 0600, in the verified directory so the rename stays on
+  # one filesystem. The name only has to be unused, not unguessable -- nobody
+  # else can write to this directory at all -- but retrying on EEXIST keeps two
+  # concurrent widget writes from colliding.
+  my ($tfh, $tmp);
+  for (1 .. 32) {
+    my $cand = sprintf('.%s.%d.%s', $name, $$,
+                       join('', map { sprintf '%02x', int rand 256 } 1 .. 6));
+    if (sysopen($tfh, at($dir, $cand), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) {
+      $tmp = $cand;
+      last;
+    }
+    my $err = $!;
+    fail("cannot create a temporary file beside $name: $err") unless $err == EEXIST;
+  }
+  defined $tmp or fail("cannot find an unused temporary name beside $name");
 
-  # Newline-terminated so these stay ordinary text files: the Lua reader takes
-  # the first line, and a person running `cat` on one gets a clean prompt back.
-  printf '%s' "$content" >"$tmp"
-  [[ $content == *$'\n' ]] || printf '\n' >>"$tmp"
-  sync "$tmp" 2>/dev/null || true
+  my $ok = eval {
+    # Newline-terminated so these stay ordinary text files: a person running
+    # `cat` on one gets a clean prompt back.
+    $content .= "\n" unless $content =~ /\n\z/;
 
-  # rename(2): the destination is replaced whole, and a symlink sitting there
-  # is replaced rather than followed. A reader sees either the old file or the
-  # new one, never a partial write.
-  mv -f -- "$tmp" "$path" || die "cannot install $name"
-  trap - EXIT
+    my $off = 0;
+    while ($off < length $content) {
+      my $n = syswrite($tfh, $content, length($content) - $off, $off);
+      defined $n or die "write failed: $!\n";
+      $off += $n;
+    }
+    $tfh->sync    or die "fsync failed: $!\n";
+    close($tfh)   or die "close failed: $!\n";
+
+    # rename(2): the destination is replaced whole, and a symlink sitting there
+    # is replaced rather than followed. A reader sees either the old file or
+    # the new one, never a partial write. Both ends resolve through $dir.
+    rename(at($dir, $tmp), at($dir, $name)) or die "rename failed: $!\n";
+    1;
+  };
+
+  unless ($ok) {
+    my $why = $@ || "unknown error";
+    chomp $why;
+    # Cleanup goes through the descriptor too, so a failed write cannot be
+    # turned into an unlink of something else.
+    unlink(at($dir, $tmp));
+    fail("cannot install $name: $why");
+  }
 }
 
-case ${1:-} in
-  read)
-    [[ $# -eq 2 ]] || usage
-    require_plain_name "$2"
-    cmd_read "$2"
-    ;;
-  write)
-    [[ $# -eq 3 ]] || usage
-    require_plain_name "$2"
-    cmd_write "$2" "$3"
-    ;;
-  *) usage ;;
-esac
+my ($cmd, @rest) = @ARGV;
+usage() unless defined $cmd;
+
+if ($cmd eq 'read') {
+  usage() unless @rest == 1;
+  require_plain_name($rest[0]);
+  cmd_read(open_state_dir(), $rest[0]);
+} elsif ($cmd eq 'write') {
+  usage() unless @rest == 2;
+  require_plain_name($rest[0]);
+  cmd_write(open_state_dir(), $rest[0], $rest[1]);
+} else {
+  usage();
+}
+
+exit 0;
