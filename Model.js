@@ -117,6 +117,81 @@ function parseSensitivityFile(text) {
   return clampSensitivity(v)
 }
 
+// ---- Generated Lua ----
+//
+// The settings file this widget writes used to read the device name back out of
+// a sibling state file at reload time, with io.open(). That was the wrong shape:
+// Hyprland's config Lua has no lstat, no O_NOFOLLOW and no O_NONBLOCK, so a FIFO
+// planted on that path blocks the reload *inside io.open*, before any bounded
+// read can help, and a symlink is followed. The file could not defend itself no
+// matter how carefully the read after the open was written.
+//
+// So the values are embedded as literals instead. The generated file opens
+// nothing, and the only outside string that reaches it -- the device name -- is
+// validated by parseTouchpadDevice and escaped by luaQuote below.
+
+// UTF-8 encode a QML/JS (UTF-16) string to a byte array, or null if the string
+// is not well-formed. Lua strings are byte strings and Hyprland compares device
+// names bytewise, so bytes are what has to be escaped, not code units.
+function utf8Bytes(str) {
+  var out = []
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff) {
+      var lo = str.charCodeAt(i + 1)
+      if (!(lo >= 0xdc00 && lo <= 0xdfff)) return null   // unpaired high surrogate
+      c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00)
+      i++
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return null                                        // unpaired low surrogate
+    }
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
+}
+
+// Render a string as a Lua double-quoted literal, or null if it will not fit
+// one safely.
+//
+// Every byte outside printable ASCII becomes a decimal escape, always written
+// with three digits: "\9" followed by a literal "9" would otherwise be read back
+// as "\99". Quote and backslash are escaped, so the literal cannot be closed
+// early and nothing after it can be read as code. The result is by construction
+// printable ASCII containing no newline, which is what isSafeLuaChunk checks.
+function luaQuote(value) {
+  var str = String(value === undefined || value === null ? "" : value)
+  if (str.length === 0 || str.length > MAX_DEVICE_NAME_CHARS) return null
+
+  var bytes = utf8Bytes(str)
+  if (bytes === null || bytes.length > MAX_DEVICE_NAME_BYTES) return null
+
+  var out = "\""
+  for (var i = 0; i < bytes.length; i++) {
+    var b = bytes[i]
+    if (b === 0x22) out += "\\\""
+    else if (b === 0x5c) out += "\\\\"
+    else if (b >= 0x20 && b <= 0x7e) out += String.fromCharCode(b)
+    else out += "\\" + (b < 10 ? "00" : b < 100 ? "0" : "") + b
+  }
+  return out + "\""
+}
+
+// Last gate before a generated chunk is handed to touchpad-state to install.
+//
+// Everything in the chunk is either a literal this widget wrote, a boolean, a
+// clamped number, or the output of luaQuote, so this should never fire. It is
+// here so that the guarantee -- nothing but printable ASCII and newlines ever
+// reaches the file -- is enforced at the point of writing rather than inferred
+// by reading every builder above it.
+function isSafeLuaChunk(lua) {
+  var str = String(lua || "")
+  if (str.length === 0 || str.length > 8192) return false
+  return !/[^\x20-\x7e\n]/.test(str)
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     parseBool: parseBool,
@@ -126,6 +201,9 @@ if (typeof module !== "undefined") {
     clampSensitivity: clampSensitivity,
     pointerSpeedLabel: pointerSpeedLabel,
     parseSensitivityFile: parseSensitivityFile,
-    scrollSpeedLabel: scrollSpeedLabel
+    scrollSpeedLabel: scrollSpeedLabel,
+    utf8Bytes: utf8Bytes,
+    luaQuote: luaQuote,
+    isSafeLuaChunk: isSafeLuaChunk
   }
 }

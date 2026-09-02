@@ -72,15 +72,24 @@ To survive that, every change is also mirrored to:
 ```
 
 Omarchy's `default/hypr/toggles.lua` re-requires that directory on each reload,
-*after* `hypr/input.lua`, so these settings win. Only booleans and a clamped
-number are ever written into the generated Lua — no device names or other
-outside strings are interpolated.
+*after* `hypr/input.lua`, so these settings win.
 
-Edit the widget, not that file; it is regenerated on every change.
+That file is generated, and it is generated as literals: booleans, a clamped
+number, and one outside string — the touchpad's device name, needed because
+Hyprland has no `input:touchpad:sensitivity` and the setting has to name its
+device. That name is filtered before it is ever stored (printable, length
+capped) and rendered as an escaped Lua byte string, so it cannot close the
+literal it sits in. The file opens nothing and `require`s nothing at reload
+time; see [Writing to a predictable path
+safely](#writing-to-a-predictable-path-safely) for why that matters.
+
+Edit the widget, not that file; it is regenerated on every change, and once
+when the shell starts so an upgraded widget never leaves the version it
+replaced sitting in the reload path.
 
 ## Writing to a predictable path safely
 
-The three files this widget persists all live at paths anyone can guess, which
+The files this widget persists all live at paths anyone can guess, which
 means a plain `> file` or `cat file` is not good enough: a symlink planted at
 one of those paths would redirect a write into whatever else it names, under
 your own uid, and a FIFO planted there would block the writer indefinitely --
@@ -128,10 +137,12 @@ descriptor already holds; it is `openat(2)`/`renameat(2)` in the spelling Perl
 core gives us.
 
 `touchpad-settings.lua` is loaded by Hyprland's Lua config, which has no
-`lstat` and no `O_NOFOLLOW` and so cannot make those guarantees itself. The
-validated directory is what protects it; on top of that, its two reads are
-byte-bounded and the values re-validated before use, so a file that somehow did
-change still cannot stall a reload or hand `hl.device` something out of range.
+`lstat`, no `O_NOFOLLOW` and no `O_NONBLOCK`, so a file it opens at reload time
+cannot defend itself: a FIFO on that path blocks the reload *inside* `io.open`,
+before any bounded read can help. So the generated file opens nothing and
+`require`s nothing. Every value in it is a literal -- booleans, a clamped
+number, and the device name rendered as an escaped Lua byte string -- written
+atomically by `touchpad-state`.
 
 ## Pointer speed is per-device on purpose
 
@@ -218,12 +229,15 @@ outlive the plugin and keep being applied on every reload. To drop them too:
 
 ```bash
 rm -f ~/.local/state/omarchy/toggles/hypr/touchpad-settings.lua \
-      ~/.local/state/omarchy/toggles/hypr/touchpad-sensitivity-name \
       ~/.local/state/omarchy/toggles/hypr/touchpad-sensitivity-value
 hyprctl reload
 ```
 
-Those three files are the only things this plugin writes outside its own
+Older versions also wrote `touchpad-sensitivity-name` beside these; the device
+name is now embedded in the generated Lua instead, so if that file is still
+present it is stale and can be removed with the others.
+
+Those files are the only things this plugin writes outside its own
 directory, and `touchpad-state` is the only thing that writes them (see
 [Writing to a predictable path safely](#writing-to-a-predictable-path-safely)).
 Leave the other files in that directory alone -- `flags.lua` and
@@ -239,7 +253,7 @@ After the reload, your touchpad returns to whatever `hypr/input.lua` specifies.
 | `Panel.qml` | The widget UI, state polling, IPC, and persistence |
 | `Model.js` | Pure helpers: `hyprctl` JSON parsing, clamping, speed labels |
 | `touchpad-sensitivity` | Applies + persists per-device pointer sensitivity |
-| `touchpad-state` | The only reader and writer of the three state files below |
+| `touchpad-state` | The only reader and writer of the state files below |
 
 ## Requirements
 
@@ -261,7 +275,7 @@ shells out to already ships with Omarchy or Hyprland:
 - Omarchy with the Quickshell bar
 - Hyprland (`hyprctl` on `PATH`)
 
-The only files written outside the plugin directory are the three listed under
+The only files written outside the plugin directory are those listed under
 [Uninstall](#uninstall). No existing user configuration is read for writing or
 overwritten, and nothing is written except in response to a control you operate.
 

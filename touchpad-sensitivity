@@ -1,11 +1,17 @@
 #!/bin/bash
 # Apply and persist the touchpad's per-device pointer sensitivity.
 #
-# Usage: touchpad-sensitivity <-1.0..1.0>
+# Usage: touchpad-sensitivity <-1.0..1.0> [device-name]
 #
 # Hyprland has no input:touchpad:sensitivity -- only the global
 # input:sensitivity, which would drag the trackpoint and any USB mouse along
 # with it. So this targets the touchpad device by name.
+#
+# The device name is normally passed in by the widget, which already resolved
+# it from the same hyprctl device list. Falling back to omarchy-hw-touchpad
+# keeps this runnable by hand, but the widget does not rely on that path: two
+# independent lookups can disagree, and the name applied here has to be the one
+# the widget persists into its generated Lua.
 #
 # Device names come from USB descriptors. They are never interpolated into a
 # shell word, and they reach `hyprctl eval` only after being escaped for a Lua
@@ -28,9 +34,10 @@ DEADLINE=5
 MAX_NAME_BYTES=256
 
 sens="${1:-}"
+device="${2:-}"
 
 # Reject anything that is not a plain decimal in range. This is the only value
-# interpolated into the Lua, so it has to be airtight.
+# interpolated into the Lua as a bare number, so it has to be airtight.
 if [[ ! $sens =~ ^-?(0(\.[0-9])?|1(\.0)?)$ ]]; then
   echo "sensitivity must be a decimal in [-1.0, 1.0], got: ${sens@Q}" >&2
   exit 1
@@ -38,8 +45,10 @@ fi
 
 # Bounded in time and in bytes: a lookup that hangs must not hang us, and one
 # that produces without end must not be read without end.
-device="$(timeout -k 2 "$DEADLINE" omarchy-hw-touchpad 2>/dev/null | head -c "$MAX_NAME_BYTES" || true)"
-device="${device%$'\n'}"
+if [[ -z $device ]]; then
+  device="$(timeout -k 2 "$DEADLINE" omarchy-hw-touchpad 2>/dev/null | head -c "$MAX_NAME_BYTES" || true)"
+  device="${device%$'\n'}"
+fi
 
 if [[ -z $device ]]; then
   echo "No touchpad device found" >&2
@@ -63,7 +72,8 @@ quoted=${quoted//\"/\\\"}
 timeout -k 2 "$DEADLINE" \
   hyprctl eval "hl.device({ name = \"$quoted\", sensitivity = $sens })" >/dev/null
 
-# Persist as data, never as generated code. touchpad-settings.lua reads these
-# back on every config reload.
-timeout -k 2 "$DEADLINE" "$STATE" write touchpad-sensitivity-name "$device"
+# Persist the value alone. The widget reads it back to restore the slider on
+# start; the device name is not persisted here, because the generated Lua that
+# re-applies this on reload now carries the name as an escaped literal rather
+# than reading it back out of a file at reload time.
 timeout -k 2 "$DEADLINE" "$STATE" write touchpad-sensitivity-value "$sens"
